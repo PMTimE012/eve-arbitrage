@@ -247,7 +247,7 @@ export function App() {
     };
   }, [dataset, destStation]);
 
-  // Live 5-minute ESI auto-refresh for selected Origin/Destination stations
+  // Live 5-minute ESI auto-refresh for selected Origin/Destination stations (paused when tab/app is hidden)
   useEffect(() => {
     if (!liveAutoRefresh || !dataset || !originStation || !destStation) return;
     const hasOrigin = originStation.stationId !== -1;
@@ -255,9 +255,12 @@ export function App() {
     if (!hasOrigin && !hasDest) return;
 
     let cancelled = false;
+    let lastAttemptAt = 0;
+    const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
     const runLiveSync = async () => {
-      if (cancelled) return;
+      if (cancelled || document.hidden) return;
+      lastAttemptAt = Date.now();
       setLiveSyncing(true);
       try {
         const [freshOrigin, freshDest] = await Promise.all([
@@ -279,17 +282,27 @@ export function App() {
     const snapshotAgeMs = dataset.updatedAt
       ? Date.now() - new Date(dataset.updatedAt).getTime()
       : Infinity;
-    if (snapshotAgeMs > 5 * 60 * 1000 || liveSyncTick > 0) {
+    if (!document.hidden && (snapshotAgeMs > SYNC_INTERVAL_MS || liveSyncTick > 0)) {
       void runLiveSync();
     }
 
     const timer = setInterval(() => {
-      void runLiveSync();
-    }, 5 * 60 * 1000);
+      if (!document.hidden) {
+        void runLiveSync();
+      }
+    }, SYNC_INTERVAL_MS);
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden && Date.now() - lastAttemptAt >= SYNC_INTERVAL_MS) {
+        void runLiveSync();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [liveAutoRefresh, dataset, originStation, destStation, liveSyncTick]);
 
