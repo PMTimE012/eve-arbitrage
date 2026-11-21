@@ -2,10 +2,19 @@ import type {
   ArbitrageOpportunity,
   ArbitrageParams,
   EmpireInstantDataset,
+  HubBook,
   JumpFilter,
   MarketDataset,
 } from '../types';
 import type { RoutePreference } from './routing';
+
+function computeTrendBonus(trendPct: number | null): number {
+  if (trendPct === null || Math.abs(trendPct) <= 10) return 0;
+  if (trendPct > 10) {
+    return Math.round(Math.min(20, Math.log2(1 + (trendPct - 10) / 35) * 8.5));
+  }
+  return -Math.round(Math.min(20, Math.pow((Math.abs(trendPct) - 10) / 75, 1.25) * 20));
+}
 
 function passesJumpFilter(jumps: number | undefined, jumpFilter: JumpFilter): boolean {
   if (jumpFilter === 'all' || jumps === undefined) return true;
@@ -15,34 +24,65 @@ function passesJumpFilter(jumps: number | undefined, jumpFilter: JumpFilter): bo
   return true;
 }
 
-type LiquidityRank = 'High' | 'Good' | 'Moderate' | 'Low';
+export type LiquidityRank = 'High' | 'Good' | 'Moderate' | 'Low';
 const LIQ_ORDER: Record<LiquidityRank, number> = { Low: 0, Moderate: 1, Good: 2, High: 3 };
+const RANK_BY_ORDER: LiquidityRank[] = ['Low', 'Moderate', 'Good', 'High'];
 
-function classifyBookLiquidity(
+export function classifyBookLiquidity(
   avg7d: number | null,
   bookVol: number,
   orderCount: number,
   qty: number,
-  checkStationDepth: boolean
+  checkStationDepth: boolean,
+  trendPct?: number | null,
+  activeDays14d?: number | null
 ): LiquidityRank {
+  let base: LiquidityRank = 'Low';
   if (avg7d !== null) {
     if (checkStationDepth) {
       if (avg7d >= Math.max(20, qty * 1.5) && bookVol >= Math.max(5, qty) && orderCount >= 2) {
-        return 'High';
+        base = 'High';
+      } else if (avg7d >= Math.max(5, qty * 0.5) && bookVol >= 2) {
+        base = 'Good';
+      } else {
+        base = avg7d >= 1 ? 'Moderate' : 'Low';
       }
-      if (avg7d >= Math.max(5, qty * 0.5) && bookVol >= 2) {
-        return 'Good';
-      }
-      return avg7d >= 1 ? 'Moderate' : 'Low';
+    } else {
+      if (avg7d >= Math.max(20, qty * 1.5)) base = 'High';
+      else if (avg7d >= Math.max(5, qty * 0.5)) base = 'Good';
+      else base = avg7d >= 1 ? 'Moderate' : 'Low';
     }
-    if (avg7d >= Math.max(20, qty * 1.5)) return 'High';
-    if (avg7d >= Math.max(5, qty * 0.5)) return 'Good';
-    return avg7d >= 1 ? 'Moderate' : 'Low';
+  } else {
+    if (bookVol >= Math.max(50, qty * 2) && orderCount >= 3) base = 'High';
+    else if (bookVol >= Math.max(15, qty) && orderCount >= 2) base = 'Good';
+    else if (bookVol >= 5 && orderCount >= 2) base = 'Moderate';
   }
-  if (bookVol >= Math.max(50, qty * 2) && orderCount >= 3) return 'High';
-  if (bookVol >= Math.max(15, qty) && orderCount >= 2) return 'Good';
-  if (bookVol >= 5 && orderCount >= 2) return 'Moderate';
-  return 'Low';
+
+  let rankIdx = LIQ_ORDER[base];
+  if (trendPct !== undefined && trendPct !== null) {
+    if (trendPct <= -75) {
+      rankIdx = Math.max(0, rankIdx - 3);
+    } else if (trendPct <= -55) {
+      rankIdx = Math.max(0, rankIdx - 2);
+    } else if (trendPct <= -35) {
+      rankIdx = Math.max(0, rankIdx - 1);
+    } else if (trendPct >= 50 && avg7d !== null && avg7d >= 3) {
+      rankIdx = Math.min(3, rankIdx + 1);
+    }
+  }
+
+  // Enforce consistency: High requires >= 13/14 active days, Good requires >= 11/14, Low if <= 5/14
+  if (activeDays14d !== undefined && activeDays14d !== null) {
+    if (activeDays14d <= 5) {
+      rankIdx = 0; // Low
+    } else if (activeDays14d < 11) {
+      rankIdx = Math.min(rankIdx, 1); // Max Moderate
+    } else if (activeDays14d < 13) {
+      rankIdx = Math.min(rankIdx, 2); // Max Good
+    }
+  }
+
+  return RANK_BY_ORDER[rankIdx];
 }
 
 export function calculateArbitrage(
@@ -173,8 +213,17 @@ export function calculateArbitrage(
       destBuys = destBuys.slice(1);
     }
 
+    const effectiveDestRegionId = destMeta?.regionId ?? destRegionId;
+    const histSell7d =
+      effectiveDestRegionId !== undefined
+        ? dataset.historySellPrice7d?.[String(effectiveDestRegionId)]?.[typeIdStr]
+        : undefined;
+    const rawDestSell = destBook.s.length > 0 ? destBook.s[0][0] : 0;
+    const cappedPatientSell =
+      histSell7d && histSell7d > 0 ? Math.min(rawDestSell, histSell7d) : rawDestSell;
+
     const bestDestTarget =
-      tradeMode === 'patient' ? destBook.s[0][0] : destBuys[0][0];
+      tradeMode === 'patient' ? cappedPatientSell : destBuys[0][0];
 
     if (buyMethod === 'order') {
       if (!originBuys.length) continue;
@@ -200,12 +249,19 @@ export function calculateArbitrage(
     if (firstUnitRoi < minRoiPct) continue;
 
     // 7-Day Avg/d real completed trading volume in destination (and origin for buyer mode)
-    const effectiveDestRegionId = destMeta?.regionId ?? destRegionId;
     const regionHist =
       effectiveDestRegionId !== undefined
         ? dataset.history7d?.[String(effectiveDestRegionId)]
         : undefined;
     const avg7d: number | null = regionHist ? (regionHist[typeIdStr] ?? 0) : null;
+    const trendPct: number | null =
+      effectiveDestRegionId !== undefined
+        ? (dataset.historyTrend7d?.[String(effectiveDestRegionId)]?.[typeIdStr] ?? null)
+        : null;
+    const activeDays14d: number | null =
+      effectiveDestRegionId !== undefined
+        ? (dataset.historyActive14d?.[String(effectiveDestRegionId)]?.[typeIdStr] ?? (regionHist ? 0 : null))
+        : null;
 
     const effectiveOriginRegionId = originMeta?.regionId ?? originRegionId;
     const originRegionHist =
@@ -215,6 +271,20 @@ export function calculateArbitrage(
     const originAvg7d: number | null = originRegionHist
       ? (originRegionHist[typeIdStr] ?? 0)
       : null;
+    const originTrendPct: number | null =
+      effectiveOriginRegionId !== undefined
+        ? (dataset.historyTrend7d?.[String(effectiveOriginRegionId)]?.[typeIdStr] ?? null)
+        : null;
+    const originActiveDays14d: number | null =
+      effectiveOriginRegionId !== undefined
+        ? (dataset.historyActive14d?.[String(effectiveOriginRegionId)]?.[typeIdStr] ?? (originRegionHist ? 0 : null))
+        : null;
+
+    // In Buy Order mode, skip slow/illiquid origin items (< 1/day or < 9/14 active days) so ISK doesn't get stuck waiting
+    if (buyMethod === 'order') {
+      if (originAvg7d !== null && originAvg7d < 1) continue;
+      if (originActiveDays14d !== null && originActiveDays14d < 9) continue;
+    }
 
     // Walk order book levels to find realistic fill quantity within budget, cargo & profitability
     let qty = 0;
@@ -263,8 +333,13 @@ export function calculateArbitrage(
         }
       }
     } else if (buyMethod === 'instant' && tradeMode === 'patient') {
-      // Instant Buy -> Sell Order: buy from origin sell levels, sell at dest lowest sell price (capped by 1d regional demand)
-      const destSellPrice = destBook.s[0][0];
+      // Instant Buy -> Sell Order: cap expected dest sell price by real 7d Avg Sell to avoid inflated sell walls
+      const histSell7d =
+        effectiveDestRegionId !== undefined
+          ? dataset.historySellPrice7d?.[String(effectiveDestRegionId)]?.[typeIdStr]
+          : undefined;
+      const destSellPrice =
+        histSell7d && histSell7d > 0 ? Math.min(destBook.s[0][0], histSell7d) : destBook.s[0][0];
       const unitNet = destSellPrice * taxMultiplier;
       const patientDemandCap = avg7d !== null ? Math.max(1, Math.floor(avg7d)) : Infinity;
 
@@ -317,9 +392,14 @@ export function calculateArbitrage(
         totalVol += take * unitVol;
       }
     } else {
-      // Buy Order -> Sell Order: place buy order at origin & place sell order at dest
+      // Buy Order -> Sell Order: cap expected dest sell price by real 7d Avg Sell to avoid inflated sell walls
       const unitBuyCost = originBuys[0][0] * buyMultiplier;
-      const destSellPrice = destBook.s[0][0];
+      const histSell7d =
+        effectiveDestRegionId !== undefined
+          ? dataset.historySellPrice7d?.[String(effectiveDestRegionId)]?.[typeIdStr]
+          : undefined;
+      const destSellPrice =
+        histSell7d && histSell7d > 0 ? Math.min(destBook.s[0][0], histSell7d) : destBook.s[0][0];
       const unitNet = destSellPrice * taxMultiplier;
       if (unitNet > unitBuyCost) {
         const unitRoi = ((unitNet - unitBuyCost) / unitBuyCost) * 100;
@@ -360,7 +440,9 @@ export function calculateArbitrage(
       destBook.bv,
       buyersCount,
       qty,
-      tradeMode === 'instant'
+      tradeMode === 'instant',
+      tradeMode === 'patient' ? trendPct : undefined,
+      activeDays14d
     );
     let liquidityLabel: LiquidityRank = destLiq;
     if (buyMethod === 'order') {
@@ -369,7 +451,9 @@ export function calculateArbitrage(
         originBook.bv,
         originBook.b.length,
         qty,
-        true
+        true,
+        originTrendPct,
+        originActiveDays14d
       );
       liquidityLabel = LIQ_ORDER[originLiq] < LIQ_ORDER[destLiq] ? originLiq : destLiq;
     }
@@ -450,44 +534,45 @@ export function calculateArbitrage(
       jumpPts = iskPerJumpPts + speedPts;
     }
 
-    let rawScore = Math.round(liqTotalPts + profitPts + roiPts + jumpPts);
+    const activeTrend =
+      tradeMode === 'patient' ? trendPct : buyMethod === 'order' ? originTrendPct : null;
+    const trendBonus = computeTrendBonus(activeTrend);
+    let rawScore = Math.round(liqTotalPts + profitPts + roiPts + jumpPts + trendBonus);
+    const notes: string[] = [];
 
     // Origin seller depth penalty (after Anti-Bait filtering, skipped when placing buy orders)
     if (buyMethod !== 'order') {
       const originSellerLevels = originSells.length;
       if (originSellerLevels <= 1) {
         rawScore = Math.min(Math.round(rawScore * 0.8), 55);
+        notes.push('1 seller level (×0.8, cap 55)');
       } else if (originSellerLevels === 2) {
         rawScore = Math.round(rawScore * 0.9);
+        notes.push('2 seller levels (×0.9)');
       } else if (originSellerLevels === 3) {
         rawScore = Math.round(rawScore * 0.96);
       }
     }
 
-    // Hard caps based on 7-Day Avg/d real market velocity & buyer depth
+    // Hard caps based on 7-Day Avg/d real market velocity & buyer depth (buyer depth caps apply to Instant Sell)
     if (effectiveVelAvg7d !== null && effectiveVelAvg7d === 0) {
       rawScore = Math.min(rawScore, 20);
+      notes.push('0 trades/d (cap 20)');
     } else if (effectiveVelAvg7d !== null && effectiveVelAvg7d < 1) {
       rawScore = Math.min(rawScore, 35);
-    } else if (destBook.bv === 0) {
+      notes.push('<1 trade/d (cap 35)');
+    } else if (tradeMode === 'instant' && destBook.bv === 0) {
       rawScore = Math.min(rawScore, 25);
-    } else if (destBook.bv < 5) {
+      notes.push('0 dest buy vol (cap 25)');
+    } else if (tradeMode === 'instant' && destBook.bv < 5) {
       rawScore = Math.min(rawScore, 40);
-    } else if (buyersCount <= 1) {
+      notes.push('<5 dest buy vol (cap 40)');
+    } else if (tradeMode === 'instant' && buyersCount <= 1) {
       rawScore = Math.min(rawScore, 50);
+      notes.push('1 dest buyer (cap 50)');
     } else if (buyMethod === 'order' && originBook.bv < 2 && originBook.sv === 0) {
       rawScore = Math.min(rawScore, 40);
-    }
-
-    // Spread sanity guard in Patient mode: if dest sell price is >10x best buy price,
-    // it's likely a meme/manipulated sell wall with no real demand at that price
-    if (tradeMode === 'patient' && destBuys.length > 0) {
-      const bestDestBuy = destBuys[0][0];
-      if (avgSell > bestDestBuy * 10) {
-        rawScore = Math.min(rawScore, 25);
-      } else if (avgSell > bestDestBuy * 5) {
-        rawScore = Math.min(rawScore, 45);
-      }
+      notes.push('thin origin book (cap 40)');
     }
 
     // Spread sanity guard in Buy Order mode (when Anti-Bait is off): penalize extreme lowball origin buy orders
@@ -498,12 +583,22 @@ export function calculateArbitrage(
         (originSells.length > 0 && bestOriginBuy < originSells[0][0] * 0.05);
       if (isLowball) {
         rawScore = Math.min(rawScore, 25);
+        notes.push('lowball origin buy (cap 25)');
       } else if (bestOriginBuy < bestDestTarget * 0.25) {
         rawScore = Math.min(rawScore, 45);
+        notes.push('weak origin buy (cap 45)');
       }
     }
 
     const tradeScore = Math.max(0, Math.min(100, rawScore));
+    const scoreBreakdown = {
+      liq: Math.round(liqTotalPts),
+      profit: Math.round(profitPts),
+      roi: Math.round(roiPts),
+      jump: Math.round(jumpPts),
+      trend: trendBonus,
+      note: notes.length > 0 ? notes.join(', ') : undefined,
+    };
     const scoreLabel: 'High' | 'Good' | 'Moderate' | 'Risky' =
       tradeScore >= 75
         ? 'High'
@@ -535,9 +630,12 @@ export function calculateArbitrage(
       cargoFillPct,
       totalProfit,
       tradeScore,
+      scoreBreakdown,
       scoreLabel,
       liquidityLabel,
       avg7d,
+      trendPct,
+      activeDays14d,
       originSellVol: originBook.sv,
       originBuyVol: originBook.bv,
       destBuyVol: destBook.bv,
@@ -620,9 +718,11 @@ export function calculateAllHubsArbitrage(
   empireData?: EmpireInstantDataset | null,
   jumpMap?: Map<number, number> | null,
   routePref: RoutePreference = 'highsec',
-  tripCandidatesOut?: ArbitrageOpportunity[]
+  tripCandidatesOut?: ArbitrageOpportunity[],
+  keepAllPerItem = false
 ): ArbitrageOpportunity[] {
   const bestByItem = new Map<number, ArbitrageOpportunity>();
+  const allMatches: ArbitrageOpportunity[] = [];
   const tripPoolByItem = tripCandidatesOut ? new Map<number, ArbitrageOpportunity[]>() : null;
   const hubJumps = dataset.jumpsFromHubs?.[String(originStationId)];
   const originKeyCount = params.originBook ? Object.keys(params.originBook).length : 0;
@@ -658,6 +758,7 @@ export function calculateAllHubsArbitrage(
 
     for (const opp of list) {
       recordOpportunity(bestByItem, tripPoolByItem, opp);
+      if (keepAllPerItem) allMatches.push(opp);
     }
   }
 
@@ -688,6 +789,7 @@ export function calculateAllHubsArbitrage(
 
       for (const opp of list) {
         recordOpportunity(bestByItem, tripPoolByItem, opp);
+        if (keepAllPerItem) allMatches.push(opp);
       }
     }
   }
@@ -698,7 +800,7 @@ export function calculateAllHubsArbitrage(
     }
   }
 
-  return Array.from(bestByItem.values());
+  return keepAllPerItem ? allMatches : Array.from(bestByItem.values());
 }
 
 export function calculateAllOriginHubsArbitrage(
@@ -709,9 +811,11 @@ export function calculateAllOriginHubsArbitrage(
   empireData?: EmpireInstantDataset | null,
   jumpMap?: Map<number, number> | null,
   routePref: RoutePreference = 'highsec',
-  tripCandidatesOut?: ArbitrageOpportunity[]
+  tripCandidatesOut?: ArbitrageOpportunity[],
+  keepAllPerItem = false
 ): ArbitrageOpportunity[] {
   const bestByItem = new Map<number, ArbitrageOpportunity>();
+  const allMatches: ArbitrageOpportunity[] = [];
   const tripPoolByItem = tripCandidatesOut ? new Map<number, ArbitrageOpportunity[]>() : null;
   const hubJumps = dataset.jumpsFromHubs?.[String(destStationId)];
   const destKeyCount = params.destBook ? Object.keys(params.destBook).length : 0;
@@ -747,6 +851,7 @@ export function calculateAllOriginHubsArbitrage(
 
     for (const opp of list) {
       recordOpportunity(bestByItem, tripPoolByItem, opp);
+      if (keepAllPerItem) allMatches.push(opp);
     }
   }
 
@@ -777,6 +882,7 @@ export function calculateAllOriginHubsArbitrage(
 
       for (const opp of list) {
         recordOpportunity(bestByItem, tripPoolByItem, opp);
+        if (keepAllPerItem) allMatches.push(opp);
       }
     }
   }
@@ -787,7 +893,214 @@ export function calculateAllOriginHubsArbitrage(
     }
   }
 
-  return Array.from(bestByItem.values());
+  return keepAllPerItem ? allMatches : Array.from(bestByItem.values());
+}
+
+function getEffectiveTopLevel(
+  levels: [number, number][],
+  side: 'sell' | 'buy',
+  skipBait: boolean
+): number | null {
+  if (!levels.length) return null;
+  if (skipBait && levels.length > 1 && levels[0][1] <= 2) {
+    if (side === 'sell' && levels[0][0] < levels[1][0] * 0.75) {
+      return levels[1][0];
+    }
+    if (side === 'buy' && levels[0][0] > levels[1][0] * 1.25) {
+      return levels[1][0];
+    }
+  }
+  return levels[0][0];
+}
+
+export function calculateAllToAllArbitrage(
+  dataset: MarketDataset,
+  params: Omit<ArbitrageParams, 'originBook' | 'destBook'>,
+  empireData?: EmpireInstantDataset | null,
+  getJumpsBetween?: (fromSystemId: number, toSystemId: number) => number | undefined,
+  tripCandidatesOut?: ArbitrageOpportunity[]
+): ArbitrageOpportunity[] {
+  const buyMethod = params.buyMethod ?? 'instant';
+  const skipBait = params.skipBaitOrders ?? true;
+  const taxMultiplier = 1 - (params.salesTaxPct + (params.tradeMode === 'patient' ? params.brokerFeePct : 0)) / 100;
+
+  interface StationWithBook {
+    stationId: number;
+    stationName: string;
+    systemId: number;
+    systemName: string;
+    regionId: number;
+    regionName: string;
+    book: Record<string, HubBook>;
+  }
+
+  const stations: StationWithBook[] = [];
+  for (const st of getPreloadedStations(dataset)) {
+    const book = dataset.orders[String(st.stationId)];
+    if (book) stations.push({ ...st, book });
+  }
+  if (params.tradeMode === 'instant' && empireData) {
+    for (const [stIdStr, book] of Object.entries(empireData.orders)) {
+      const st = empireData.stations[stIdStr];
+      if (st) stations.push({ ...st, book });
+    }
+  }
+
+  interface ExtremumEntry {
+    st: StationWithBook;
+    price: number;
+  }
+
+  // Keep top 2 best origin & top 2 best dest stations per typeId
+  const bestOrigins = new Map<string, ExtremumEntry[]>();
+  const bestDests = new Map<string, ExtremumEntry[]>();
+
+  const pushMin2 = (map: Map<string, ExtremumEntry[]>, key: string, entry: ExtremumEntry) => {
+    let arr = map.get(key);
+    if (!arr) {
+      map.set(key, [entry]);
+      return;
+    }
+    if (arr.length === 1) {
+      if (entry.price < arr[0].price) arr.unshift(entry);
+      else arr.push(entry);
+    } else if (entry.price < arr[0].price) {
+      arr[1] = arr[0];
+      arr[0] = entry;
+    } else if (entry.price < arr[1].price) {
+      arr[1] = entry;
+    }
+  };
+
+  const pushMaxN = (map: Map<string, ExtremumEntry[]>, key: string, entry: ExtremumEntry, limit = 3) => {
+    let arr = map.get(key);
+    if (!arr) {
+      map.set(key, [entry]);
+      return;
+    }
+    arr.push(entry);
+    arr.sort((a, b) => b.price - a.price);
+    if (arr.length > limit) arr.length = limit;
+  };
+
+  for (const st of stations) {
+    for (const [typeIdStr, entry] of Object.entries(st.book)) {
+      if (!dataset.items[typeIdStr]) continue;
+
+      if (buyMethod === 'instant') {
+        const origPrice = getEffectiveTopLevel(entry.s, 'sell', skipBait);
+        if (origPrice !== null && origPrice > 0) {
+          pushMin2(bestOrigins, typeIdStr, { st, price: origPrice });
+        }
+      } else {
+        const origPrice = getEffectiveTopLevel(entry.b, 'buy', skipBait);
+        if (origPrice !== null && origPrice > 0) {
+          const sellFloor = entry.s.length > 0 ? entry.s[0][0] * 0.05 : 0;
+          if (origPrice >= sellFloor) {
+            pushMin2(bestOrigins, typeIdStr, { st, price: origPrice });
+          }
+        }
+      }
+
+      if (params.tradeMode === 'instant') {
+        const destPrice = getEffectiveTopLevel(entry.b, 'buy', skipBait);
+        if (destPrice !== null && destPrice > 0) {
+          pushMaxN(bestDests, typeIdStr, { st, price: destPrice }, 3);
+        }
+      } else {
+        const rawSell = entry.s.length > 0 ? entry.s[0][0] : null;
+        const histSell = dataset.historySellPrice7d?.[String(st.regionId)]?.[typeIdStr];
+        const destPrice =
+          rawSell !== null && histSell && histSell > 0
+            ? Math.min(rawSell, histSell)
+            : rawSell;
+        if (destPrice !== null && destPrice > 0) {
+          pushMaxN(bestDests, typeIdStr, { st, price: destPrice }, 3);
+        }
+      }
+    }
+  }
+
+  const results: ArbitrageOpportunity[] = [];
+  for (const [typeIdStr, origList] of bestOrigins.entries()) {
+    const destList = bestDests.get(typeIdStr);
+    if (!destList) continue;
+
+    // Collect profitable (origin, dest) pairs sorted by spread descending
+    const pairs: { orig: ExtremumEntry; dest: ExtremumEntry; spread: number }[] = [];
+    const seenDest = new Set<number>();
+
+    for (const d of destList) {
+      let bestOrigForDest: ExtremumEntry | null = null;
+      let bestSpreadForDest = 0;
+      for (const o of origList) {
+        if (o.st.stationId === d.st.stationId) continue;
+        const spread = d.price * taxMultiplier - o.price;
+        if (spread > bestSpreadForDest) {
+          bestSpreadForDest = spread;
+          bestOrigForDest = o;
+        }
+      }
+      if (bestOrigForDest && !seenDest.has(d.st.stationId)) {
+        seenDest.add(d.st.stationId);
+        pairs.push({ orig: bestOrigForDest, dest: d, spread: bestSpreadForDest });
+      }
+    }
+
+    if (pairs.length === 0) continue;
+    pairs.sort((a, b) => b.spread - a.spread);
+
+    const maxToEval = tripCandidatesOut ? Math.min(3, pairs.length) : 1;
+    let recordedPrimary = false;
+
+    for (let i = 0; i < maxToEval; i++) {
+      const { orig: chosenOrig, dest: chosenDest } = pairs[i];
+      const jumps = getJumpsBetween?.(chosenOrig.st.systemId, chosenDest.st.systemId);
+      if (params.jumpFilter !== 'all' && jumps === undefined) continue;
+      if (!passesJumpFilter(jumps, params.jumpFilter)) continue;
+
+      const list = calculateArbitrage(
+        dataset,
+        {
+          ...params,
+          originBook: { [typeIdStr]: chosenOrig.st.book[typeIdStr] },
+          destBook: { [typeIdStr]: chosenDest.st.book[typeIdStr] },
+          originRegionId: chosenOrig.st.regionId,
+          destRegionId: chosenDest.st.regionId,
+        },
+        {
+          stationId: chosenDest.st.stationId,
+          stationName: chosenDest.st.stationName,
+          systemId: chosenDest.st.systemId,
+          systemName: chosenDest.st.systemName,
+          regionId: chosenDest.st.regionId,
+          regionName: chosenDest.st.regionName,
+          jumps,
+        },
+        {
+          stationId: chosenOrig.st.stationId,
+          stationName: chosenOrig.st.stationName,
+          systemId: chosenOrig.st.systemId,
+          systemName: chosenOrig.st.systemName,
+          regionId: chosenOrig.st.regionId,
+          regionName: chosenOrig.st.regionName,
+          jumps,
+        }
+      );
+
+      if (list.length > 0) {
+        if (!recordedPrimary) {
+          results.push(list[0]);
+          recordedPrimary = true;
+        }
+        if (tripCandidatesOut) {
+          tripCandidatesOut.push(list[0]);
+        }
+      }
+    }
+  }
+
+  return results;
 }
 
 export function formatISK(value: number, compact = false): string {

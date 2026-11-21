@@ -252,11 +252,11 @@ export function StationSelector({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-800">
-              {/* Column 1: Top 10 High-Volume Stations */}
+              {/* Column 1: Top High-Volume Stations */}
               <div className="flex flex-col">
                 <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
                   <Flame className="w-3.5 h-3.5 shrink-0" />
-                  <span>Top 10 High-Volume Hubs</span>
+                  <span>Top {topStations.length} High-Volume Hubs</span>
                 </div>
                 <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/50">
                   {topStations.map((st, idx) => (
@@ -270,7 +270,7 @@ export function StationSelector({
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
-                          <span className="text-[10px] font-bold text-slate-500 w-4 shrink-0">
+                          <span className="text-[10px] font-bold text-slate-500 min-w-6 shrink-0 tabular-nums">
                             #{idx + 1}
                           </span>
                           <span
@@ -305,11 +305,11 @@ export function StationSelector({
                 </div>
               </div>
 
-              {/* Column 2: Top 10 Faction Warfare & Reship Stations */}
+              {/* Column 2: Top Faction Warfare & Reship Stations */}
               <div className="flex flex-col">
                 <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 text-[11px] font-semibold text-rose-300 flex items-center gap-1.5">
                   <Swords className="w-3.5 h-3.5 shrink-0" />
-                  <span>Top 10 Faction Warfare & Reship</span>
+                  <span>Top {fwStations.length} Faction Warfare & Reship</span>
                 </div>
                 <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/50">
                   {fwStations.length === 0 ? (

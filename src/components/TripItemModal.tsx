@@ -1,5 +1,5 @@
 import { ExternalLink, X } from 'lucide-react';
-import type { StationOption } from '../types';
+import type { BuyMethod, StationOption, TradeMode } from '../types';
 import { formatISK, formatInt, formatVolume } from '../utils/arbitrage';
 import type { DailyVolumeStats } from '../utils/history';
 import type { TripItemPick } from '../utils/tripPlanner';
@@ -9,6 +9,8 @@ import { VolumeComparison } from './VolumeComparison';
 
 interface TripItemModalProps {
   item: TripItemPick;
+  buyMethod: BuyMethod;
+  tradeMode: TradeMode;
   originStation: StationOption | null;
   destStation: StationOption | null;
   originStats: DailyVolumeStats | null;
@@ -20,6 +22,8 @@ interface TripItemModalProps {
 
 export function TripItemModal({
   item,
+  buyMethod,
+  tradeMode,
   originStation,
   destStation,
   originStats,
@@ -125,8 +129,12 @@ export function TripItemModal({
         {/* Compact 2-Column Order Book */}
         <OrderBookGrid
           opp={opp}
+          buyMethod={buyMethod}
+          tradeMode={tradeMode}
           originSystemFallback={originStation?.systemName}
           destSystemFallback={destStation?.systemName}
+          originStats={originStats}
+          destStats={destStats}
           maxLevels={4}
         />
 

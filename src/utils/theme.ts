@@ -16,9 +16,14 @@ export interface TradeTheme {
   accentText: string;
 }
 
-export function getTradeTheme(buyMethod: BuyMethod, tradeMode: TradeMode): TradeTheme {
-  const isInstant = tradeMode === 'instant' && buyMethod === 'instant';
-  const isBuyer = buyMethod === 'order';
+export function getTradeTheme(
+  buyMethod: BuyMethod,
+  tradeMode: TradeMode,
+  activeTab: 'arbitrage' | 'trending' | 'lp' = 'arbitrage'
+): TradeTheme {
+  const isNeutralTab = activeTab === 'trending' || activeTab === 'lp';
+  const isInstant = !isNeutralTab && tradeMode === 'instant' && buyMethod === 'instant';
+  const isBuyer = !isNeutralTab && !isInstant;
 
   return {
     pageBg: isInstant

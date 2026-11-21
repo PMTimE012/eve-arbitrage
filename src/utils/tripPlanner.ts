@@ -44,7 +44,7 @@ export interface TripStop {
 }
 
 export interface TripPlan {
-  id: 'fastest' | 'maxProfit' | 'safest';
+  id: string;
   title: string;
   subtitle: string;
   stops: TripStop[];
@@ -175,18 +175,41 @@ function packItemsForStops(
   maxBudget: number,
   maxCargo: number,
   priorityFn: (c: CandidateItem) => number,
-  maxSharePerItem = 0.4,
+  _maxSharePerItem = 1,
   minItemScore = 26,
-  maxDistinctItems = Infinity
+  maxDistinctItems = Infinity,
+  minItemProfit = 200_000,
+  excludedTypeIds?: Set<number>
 ): Map<number, TripItemPick[]> {
+  const knapsackEfficiency = (c: CandidateItem): number => {
+    const { opp } = c;
+    const unitVol = opp.unitVolume > 0 ? opp.unitVolume : 0.01;
+    const safeQty = getMaxSafeQty(opp, tradeMode);
+    if (safeQty <= 0) return 0;
+
+    const maxByB = maxBudget > 0 ? Math.floor(maxBudget / opp.buyPrice) : safeQty;
+    const maxByC = maxCargo > 0 ? Math.floor(maxCargo / unitVol) : safeQty;
+    const feasibleQty = Math.min(safeQty, maxByB, maxByC);
+    if (feasibleQty <= 0) return 0;
+
+    const feasibleProfit = feasibleQty * opp.profitPerUnit;
+    const budgetShare = maxBudget > 0 ? (feasibleQty * opp.buyPrice) / maxBudget : 0;
+    const cargoShare = maxCargo > 0 ? (feasibleQty * unitVol) / maxCargo : 0;
+    const resourceUse = Math.max(0.25, budgetShare + cargoShare);
+    return feasibleProfit / resourceUse;
+  };
+
   const pool = candidates
-    .filter((c) => chosenStationIds.has(c.stationId) && c.opp.tradeScore >= minItemScore)
-    .sort((a, b) => priorityFn(b) - priorityFn(a));
+    .filter(
+      (c) =>
+        chosenStationIds.has(c.stationId) &&
+        c.opp.tradeScore >= minItemScore &&
+        !excludedTypeIds?.has(c.opp.typeId)
+    )
+    .sort((a, b) => knapsackEfficiency(b) - knapsackEfficiency(a) || priorityFn(b) - priorityFn(a));
 
   let remBudget = maxBudget > 0 ? maxBudget : Infinity;
   let remCargo = maxCargo > 0 ? maxCargo : Infinity;
-  const perItemBudgetCap = maxBudget > 0 ? maxBudget * maxSharePerItem : Infinity;
-  const perItemCargoCap = maxCargo > 0 ? maxCargo * maxSharePerItem : Infinity;
 
   const pickedByStation = new Map<number, TripItemPick[]>();
   const pickedByType = new Map<number, { pick: TripItemPick; candidate: CandidateItem }>();
@@ -224,8 +247,8 @@ function packItemsForStops(
     const addCost = takeQty * unitCost;
     const addProfit = takeQty * opp.profitPerUnit;
     const addVol = takeQty * unitVol;
-    // Prevent micro-splitting: each new item pick must yield > 200K ISK profit
-    if (!existing && addProfit <= 200_000) return;
+    // Use the same minProfit threshold as the main opportunities table
+    if (!existing && addProfit < minItemProfit) return;
 
     remBudget -= addCost;
     remCargo -= addVol;
@@ -260,23 +283,15 @@ function packItemsForStops(
     }
   };
 
-  // Pass 1: Diversified packing (cap each single item at 40% of budget/cargo)
+  // Single-pass greedy packing: pick highest-priority items up to full budget/cargo
   for (const c of pool) {
-    if (pickedByType.has(c.opp.typeId)) continue;
-    tryPick(c, perItemBudgetCap, perItemCargoCap);
-  }
-
-  // Pass 2: Top up remaining space/budget only if fewer than 3 items or leftover capacity exists
-  if (remBudget > 500_000 && remCargo > 1) {
-    for (const c of pool) {
-      tryPick(c, Infinity, Infinity);
-    }
+    tryPick(c, Infinity, Infinity);
   }
 
   return pickedByStation;
 }
 
-export function generateThreeTripPlans(params: {
+export function generateTripPlans(params: {
   opportunities: ArbitrageOpportunity[];
   originStation: StationOption | null;
   destStation: StationOption | null;
@@ -288,6 +303,7 @@ export function generateThreeTripPlans(params: {
   maxBudget: number;
   maxCargo: number;
   maxStops: number;
+  minProfit?: number;
 }): TripPlan[] {
   const {
     opportunities,
@@ -301,14 +317,83 @@ export function generateThreeTripPlans(params: {
     maxBudget,
     maxCargo,
     maxStops,
+    minProfit = 0,
   } = params;
 
   const maxDistinctItems = tradeMode === 'patient' || buyMethod === 'order' ? 4 : Infinity;
+  const minItemProfit = minProfit;
 
   if (!opportunities.length || !originStation || !destStation) return [];
 
   const isOriginAll = originStation.stationId === -1;
   const isDestAll = destStation.stationId === -1;
+
+  if (isOriginAll && isDestAll) {
+    // Group All->All candidates by Destination Station and build multi-stop corridor plans for Top 6 destinations
+    const destMap = new Map<
+      number,
+      {
+        dest: StationOption;
+        totalProfit: number;
+        opps: ArbitrageOpportunity[];
+      }
+    >();
+
+    for (const opp of opportunities) {
+      if (!opp.destStationId || !opp.destSystemId) continue;
+      let grp = destMap.get(opp.destStationId);
+      if (!grp) {
+        grp = {
+          dest: {
+            stationId: opp.destStationId,
+            stationName: opp.destStationName ?? 'Destination',
+            systemId: opp.destSystemId,
+            systemName: opp.destSystemName ?? '',
+            regionId: opp.destRegionId ?? -1,
+            regionName: opp.destRegionName ?? '',
+            security: universe?.systems[String(opp.destSystemId)]?.[2] ?? 0.5,
+            hubKey: null,
+          },
+          totalProfit: 0,
+          opps: [],
+        };
+        destMap.set(opp.destStationId, grp);
+      }
+      grp.totalProfit += opp.totalProfit;
+      grp.opps.push(opp);
+    }
+
+    const topDests = Array.from(destMap.values())
+      .sort((a, b) => b.totalProfit - a.totalProfit)
+      .slice(0, 6);
+
+    const allPlans: TripPlan[] = [];
+    const seenRouteSig = new Set<string>();
+
+    for (const grp of topDests) {
+      const subPlans = generateTripPlans({
+        ...params,
+        opportunities: grp.opps,
+        destStation: grp.dest,
+      });
+      for (const p of subPlans) {
+        const sig = `${p.stops.map((s) => s.stationId).join(',')}->${grp.dest.stationId}`;
+        if (seenRouteSig.has(sig)) continue;
+        seenRouteSig.add(sig);
+        allPlans.push(p);
+      }
+    }
+
+    allPlans.sort((a, b) => b.iskPerJump - a.iskPerJump);
+    const top5 = allPlans.slice(0, 5);
+    top5.forEach((plan, idx) => {
+      plan.id = `plan-${idx + 1}`;
+      plan.title = `Plan #${idx + 1} • Best ISK/Jump`;
+      plan.subtitle = idx === 0 ? 'Highest ISK per jump corridor' : `Rank #${idx + 1} ISK per jump corridor`;
+    });
+    return top5;
+  }
+
   const mode: 'allToDest' | 'originToAll' | 'single' = isOriginAll
     ? 'allToDest'
     : isDestAll
@@ -375,7 +460,7 @@ export function generateThreeTripPlans(params: {
   for (const c of candidates) {
     if (c.opp.tradeScore <= 25) continue;
     const maxSafeQty = getMaxSafeQty(c.opp, tradeMode);
-    if (maxSafeQty <= 0 || maxSafeQty * c.opp.profitPerUnit <= 200_000) continue;
+    if (maxSafeQty <= 0 || maxSafeQty * c.opp.profitPerUnit < minItemProfit) continue;
 
     const vel = (c.opp.avg7d ?? c.opp.destBuyVol) + 1;
     const turnover = vel / Math.max(1, maxSafeQty);
@@ -408,7 +493,8 @@ export function generateThreeTripPlans(params: {
     subtitle: string,
     selectedStations: typeof allValidStations,
     priorityFn: (c: CandidateItem) => number,
-    maxSharePerItem = 0.4
+    maxSharePerItem = 0.4,
+    excludedTypeIds?: Set<number>
   ): TripPlan | null => {
     const stationIdSet = new Set(selectedStations.map((s) => s.stationId));
     const pickedMap = packItemsForStops(
@@ -420,7 +506,9 @@ export function generateThreeTripPlans(params: {
       priorityFn,
       maxSharePerItem,
       26,
-      maxDistinctItems
+      maxDistinctItems,
+      minItemProfit,
+      excludedTypeIds
     );
 
     const activeStations = selectedStations.filter(
@@ -525,116 +613,158 @@ export function generateThreeTripPlans(params: {
 
   const effectiveMaxStops = mode === 'single' ? 1 : Math.max(1, Math.min(5, maxStops));
 
-  // Corridor stop selector: picks the best #1 seed station for the plan's goal,
-  // then only adds stops that lie along the route back to anchor (minimal detour!)
+  // Rank stations by estimated ISK/Jump (profit divided by jumps to/from anchor)
+  const anchorJumpMap = getSystemJumpMap(anchorSystemId, universe, routePref);
+  const getAnchorJumps = (systemId: number) => Math.max(1, anchorJumpMap?.get(systemId) ?? 20);
+
+  const iskPerJumpRanked = [...allValidStations].sort(
+    (a, b) => b.totalProfit / getAnchorJumps(b.systemId) - a.totalProfit / getAnchorJumps(a.systemId)
+  );
+
+  const profitPriority = (c: CandidateItem) => c.opp.totalProfit;
+
+  // Corridor stop selector: scans ALL stations (pre-filtered in O(1) by proximity & ISK/jump),
+  // then only adds stops that are actually worth it by real packed ISK/Jump!
   const selectCorridorStops = (rankedStations: typeof allValidStations) => {
     if (rankedStations.length === 0) return [];
-    if (effectiveMaxStops === 1) return [rankedStations[0]];
-
     const chosen = [rankedStations[0]];
-    const baseJumps = getExactOptimalOrder(
-      chosen,
-      anchorSystemId,
-      destStation.systemId,
-      mode,
-      universe,
-      routePref
-    ).totalJumps;
+    if (effectiveMaxStops === 1) return chosen;
 
-    const maxAllowedTotal = baseJumps + 6; // Max +6 detour jumps for extra stops
+    let curPlan = buildPlanFromStations(
+      'trial',
+      '',
+      '',
+      chosen,
+      profitPriority,
+      0.4
+    );
+    if (!curPlan) return chosen;
 
     for (let step = 1; step < effectiveMaxStops; step++) {
+      // If both budget and cargo are already >= 98% full, no need to detour further
+      const budgetFull = curPlan.budgetUsedPct !== null && curPlan.budgetUsedPct >= 98;
+      const cargoFull = curPlan.cargoFillPct !== null && curPlan.cargoFillPct >= 98;
+      if (budgetFull || cargoFull) break;
+
+      const remaining = rankedStations.filter(
+        (cand) => !chosen.some((c) => c.stationId === cand.stationId)
+      );
+      if (remaining.length === 0) break;
+
+      // O(1) shortlist across ALL stations: top 15 by ISK/Jump + top 15 closest to current chosen systems
+      const shortlistMap = new Map<number, (typeof rankedStations)[0]>();
+      for (const s of remaining.slice(0, 15)) {
+        shortlistMap.set(s.stationId, s);
+      }
+
+      const chosenJumpMaps = chosen.map((c) => getSystemJumpMap(c.systemId, universe, routePref));
+      const byProximity = [...remaining]
+        .map((s) => {
+          let minDist = Infinity;
+          for (const jm of chosenJumpMaps) {
+            const d = jm?.get(s.systemId);
+            if (d !== undefined && d < minDist) minDist = d;
+          }
+          return { s, minDist };
+        })
+        .sort((a, b) => a.minDist - b.minDist || b.s.totalProfit - a.s.totalProfit);
+
+      for (const { s } of byProximity.slice(0, 15)) {
+        shortlistMap.set(s.stationId, s);
+      }
+
       let bestNext: (typeof rankedStations)[0] | null = null;
-      let bestScore = -Infinity;
+      let bestTrialPlan: TripPlan | null = null;
+      let bestIskPerJump = -Infinity;
 
-      for (let i = 1; i < Math.min(rankedStations.length, 40); i++) {
-        const cand = rankedStations[i];
-        if (chosen.some((c) => c.stationId === cand.stationId)) continue;
-
-        const trial = getExactOptimalOrder(
+      for (const cand of shortlistMap.values()) {
+        const trialPlan = buildPlanFromStations(
+          'trial',
+          '',
+          '',
           [...chosen, cand],
-          anchorSystemId,
-          destStation.systemId,
-          mode,
-          universe,
-          routePref
+          profitPriority,
+          0.4
         );
-        if (trial.totalJumps > maxAllowedTotal) continue;
+        if (!trialPlan || trialPlan.totalProfit <= curPlan.totalProfit) continue;
 
-        // Prefer stations closer to the corridor (smaller detour + higher rank)
-        const rankBonus = (40 - i) * 2;
-        const detourPenalty = (trial.totalJumps - baseJumps) * 15;
-        const score = rankBonus - detourPenalty;
-        if (score > bestScore) {
-          bestScore = score;
+        const detourJumps = Math.max(0, trialPlan.totalJumps - curPlan.totalJumps);
+        // Worth-it check: 0 extra jumps is always worth it; otherwise new ISK/Jump must stay >= 85% of current
+        const isWorthIt =
+          detourJumps === 0 || trialPlan.iskPerJump >= curPlan.iskPerJump * 0.85;
+        if (!isWorthIt) continue;
+
+        if (trialPlan.iskPerJump > bestIskPerJump) {
+          bestIskPerJump = trialPlan.iskPerJump;
           bestNext = cand;
+          bestTrialPlan = trialPlan;
         }
       }
 
-      if (!bestNext) break;
+      if (!bestNext || !bestTrialPlan) break;
       chosen.push(bestNext);
+      curPlan = bestTrialPlan;
     }
 
     return chosen;
   };
-
-  // All 3 plans optimize for Max Total Profit across 3 distinct routes/corridors
-  const maxProfitRanked = [...allValidStations].sort(
-    (a, b) => b.totalProfit - a.totalProfit
-  );
-
-  const profitPriority = (c: CandidateItem) => c.opp.totalProfit;
   const usedStopStationIds = new Set<number>();
   const usedSeedStationIds = new Set<number>();
 
   const pickDistinctRanked = () => {
     // Prefer stations not visited in previous plans' routes
-    const disjoint = maxProfitRanked.filter((s) => !usedStopStationIds.has(s.stationId));
+    const disjoint = iskPerJumpRanked.filter((s) => !usedStopStationIds.has(s.stationId));
     if (disjoint.length > 0) return disjoint;
     // Fallback: at least avoid repeating a previous plan's primary seed station
-    return maxProfitRanked.filter((s) => !usedSeedStationIds.has(s.stationId));
+    return iskPerJumpRanked.filter((s) => !usedSeedStationIds.has(s.stationId));
   };
 
-  const planConfigs: { id: TripPlan['id']; title: string; subtitle: string }[] = [
-    {
-      id: 'maxProfit',
-      title: 'Plan 1: Max Total Profit (Route A)',
-      subtitle: 'Top profit corridor filling cargo & budget',
-    },
-    {
-      id: 'fastest',
-      title: 'Plan 2: Max Total Profit (Route B)',
-      subtitle: '2nd distinct high-profit corridor',
-    },
-    {
-      id: 'safest',
-      title: 'Plan 3: Max Total Profit (Route C)',
-      subtitle: '3rd distinct high-profit corridor',
-    },
-  ];
-
   const plans: TripPlan[] = [];
-  for (const cfg of planConfigs) {
-    const pool = plans.length === 0 ? maxProfitRanked : pickDistinctRanked();
+  const excludedTypeIds = mode === 'single' ? new Set<number>() : undefined;
+
+  for (let i = 0; i < 5; i++) {
+    const pool =
+      mode === 'single'
+        ? allValidStations
+        : plans.length === 0
+        ? iskPerJumpRanked
+        : pickDistinctRanked();
     if (pool.length === 0) break;
 
-    const selected = selectCorridorStops(pool);
+    const selected = mode === 'single' ? [pool[0]] : selectCorridorStops(pool);
     const plan = buildPlanFromStations(
-      cfg.id,
-      cfg.title,
-      cfg.subtitle,
+      `plan-${i + 1}`,
+      `Plan ${i + 1}`,
+      'Sorted by highest ISK / Jump',
       selected,
       profitPriority,
-      0.4
+      0.4,
+      excludedTypeIds
     );
     if (!plan || plan.stops.length === 0) continue;
 
     plans.push(plan);
-    usedSeedStationIds.add(pool[0].stationId);
-    for (const stop of plan.stops) {
-      usedStopStationIds.add(stop.stationId);
+    if (excludedTypeIds) {
+      for (const stop of plan.stops) {
+        for (const it of stop.items) {
+          excludedTypeIds.add(it.typeId);
+        }
+      }
+    } else {
+      usedSeedStationIds.add(pool[0].stationId);
+      for (const stop of plan.stops) {
+        usedStopStationIds.add(stop.stationId);
+      }
     }
   }
+
+  // Sort final plans by ISK/Jump (highest first) and label #1..#5
+  plans.sort((a, b) => b.iskPerJump - a.iskPerJump);
+  plans.forEach((plan, idx) => {
+    plan.id = `plan-${idx + 1}`;
+    plan.title = `Plan #${idx + 1} • Best ISK/Jump`;
+    plan.subtitle = idx === 0 ? 'Highest ISK per jump corridor' : `Rank #${idx + 1} ISK per jump corridor`;
+  });
 
   return plans;
 }

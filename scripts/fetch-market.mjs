@@ -59,6 +59,15 @@ const EXTRA_RANK_REGION_IDS = [
 const MILITIA_REGEX =
   /State Protectorate|Federal Defense Union|24th Imperial Crusade|Tribal Liberation Force/;
 
+const FW_MILITIAS = [
+  { corporationId: 1000180, name: 'State Protectorate', factionName: 'Caldari State', shortName: 'Caldari' },
+  { corporationId: 1000181, name: 'Federal Defense Union', factionName: 'Gallente Federation', shortName: 'Gallente' },
+  { corporationId: 1000179, name: '24th Imperial Crusade', factionName: 'Amarr Empire', shortName: 'Amarr' },
+  { corporationId: 1000182, name: 'Tribal Liberation Force', factionName: 'Minmatar Republic', shortName: 'Minmatar' },
+  { corporationId: 1000437, name: 'Commando Guri', factionName: 'Guristas Pirates', shortName: 'Guristas' },
+  { corporationId: 1000436, name: 'Malakim Zealots', factionName: 'Angel Cartel', shortName: 'Angel' },
+];
+
 const USER_AGENT = 'EVE-Hub-Arbitrage/1.0 (https://github.com/)';
 
 async function fetchWithRetry(url, retries = 4) {
@@ -75,11 +84,13 @@ async function fetchWithRetry(url, retries = 4) {
         continue;
       }
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status} for ${url}`);
+        const err = new Error(`HTTP ${res.status} for ${url}`);
+        err.noRetry = res.status >= 400 && res.status < 500;
+        throw err;
       }
       return res;
     } catch (err) {
-      if (attempt === retries) throw err;
+      if (err?.noRetry || attempt === retries) throw err;
       await new Promise((r) => setTimeout(r, attempt * 1000));
     }
   }
@@ -96,6 +107,40 @@ async function runPool(items, concurrency, fn) {
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   return results;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      row.push(cur);
+      cur = '';
+    } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cur);
+      if (row.length > 1 || row[0] !== '') rows.push(row);
+      row = [];
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.length > 0 || row.length > 0) {
+    row.push(cur);
+    rows.push(row);
+  }
+  return rows;
 }
 
 function parseCsvLine(line) {
@@ -123,9 +168,10 @@ function parseCsvLine(line) {
 }
 
 async function loadSdeData() {
-  console.log('Downloading Fuzzwork SDE (invTypes, invVolumes, staStations, mapSolarSystems, mapRegions, mapSolarSystemJumps)...');
-  const [typesRes, volRes, stationsRes, systemsRes, regionsRes, jumpsRes] = await Promise.all([
+  console.log('Downloading Fuzzwork SDE (invTypes, invGroups, invVolumes, staStations, mapSolarSystems, mapRegions, mapSolarSystemJumps)...');
+  const [typesRes, groupsRes, volRes, stationsRes, systemsRes, regionsRes, jumpsRes] = await Promise.all([
     fetchWithRetry('https://www.fuzzwork.co.uk/dump/latest/csv/invTypes.csv'),
+    fetchWithRetry('https://www.fuzzwork.co.uk/dump/latest/csv/invGroups.csv'),
     fetchWithRetry('https://www.fuzzwork.co.uk/dump/latest/csv/invVolumes.csv'),
     fetchWithRetry('https://www.fuzzwork.co.uk/dump/latest/csv/staStations.csv'),
     fetchWithRetry('https://www.fuzzwork.co.uk/dump/latest/csv/mapSolarSystems.csv'),
@@ -133,14 +179,29 @@ async function loadSdeData() {
     fetchWithRetry('https://www.fuzzwork.co.uk/dump/latest/csv/mapSolarSystemJumps.csv'),
   ]);
 
-  const [typesCsv, volCsv, stationsCsv, systemsCsv, regionsCsv, jumpsCsv] = await Promise.all([
+  const [typesCsv, groupsCsv, volCsv, stationsCsv, systemsCsv, regionsCsv, jumpsCsv] = await Promise.all([
     typesRes.text(),
+    groupsRes.text(),
     volRes.text(),
     stationsRes.text(),
     systemsRes.text(),
     regionsRes.text(),
     jumpsRes.text(),
   ]);
+
+  // Identify Skillbook groups (categoryID === 16) so we can exclude them
+  const skillGroupIds = new Set();
+  const gLines = groupsCsv.split(/\r?\n/);
+  const gHeaders = parseCsvLine(gLines[0]);
+  const gIdxId = gHeaders.indexOf('groupID');
+  const gIdxCat = gHeaders.indexOf('categoryID');
+  for (let i = 1; i < gLines.length; i++) {
+    if (!gLines[i]) continue;
+    const cols = parseCsvLine(gLines[i]);
+    if (Number(cols[gIdxCat]) === 16) {
+      skillGroupIds.add(Number(cols[gIdxId]));
+    }
+  }
 
   const packagedVolumes = new Map();
   for (const line of volCsv.split(/\r?\n/).slice(1)) {
@@ -153,19 +214,20 @@ async function loadSdeData() {
   }
 
   const items = {};
-  const typeLines = typesCsv.split(/\r?\n/);
-  const tHeaders = parseCsvLine(typeLines[0]);
+  const typeRows = parseCsv(typesCsv);
+  const tHeaders = typeRows[0];
   const idxId = tHeaders.indexOf('typeID');
+  const idxGroup = tHeaders.indexOf('groupID');
   const idxName = tHeaders.indexOf('typeName');
   const idxVol = tHeaders.indexOf('volume');
   const idxPub = tHeaders.indexOf('published');
   const idxMkt = tHeaders.indexOf('marketGroupID');
 
-  for (let i = 1; i < typeLines.length; i++) {
-    const line = typeLines[i];
-    if (!line) continue;
-    const cols = parseCsvLine(line);
+  for (let i = 1; i < typeRows.length; i++) {
+    const cols = typeRows[i];
+    if (!cols || cols.length <= idxMkt) continue;
     if (cols[idxPub] !== '1') continue;
+    if (skillGroupIds.has(Number(cols[idxGroup]))) continue;
     const mkt = cols[idxMkt];
     if (!mkt || mkt === 'None' || mkt === '\\N') continue;
 
@@ -390,10 +452,10 @@ async function fetchFwAndActivity(sde) {
 
   const fwStations = Array.from(bestBySystem.values())
     .sort((a, b) => b._score - a._score)
-    .slice(0, 10)
+    .slice(0, 50)
     .map(({ _score: _, ...rest }) => rest);
 
-  console.log('Top 10 FW/Reship:', fwStations.map((s) => `${s.systemName} (${s.jumps}j/${s.shipKills}k)`).join(', '));
+  console.log('Top 50 FW/Reship:', fwStations.slice(0, 10).map((s) => `${s.systemName} (${s.jumps}j/${s.shipKills}k)`).join(', '), '...');
   return fwStations;
 }
 
@@ -472,115 +534,298 @@ function accumulateStationStats(pages, stationLookup, statsMap) {
   }
 }
 
-async function fetchRoutes(hubs, allTargetStations) {
-  // Fetch routes between the 5 major hubs and all 20 target stations
-  const pairs = [];
-  const seen = new Set();
-  for (const from of hubs) {
-    for (const to of allTargetStations) {
-      if (from.systemId === to.systemId) continue;
-      const k1 = `${from.systemId}->${to.systemId}`;
-      if (!seen.has(k1)) {
-        seen.add(k1);
-        pairs.push({ fromSys: from.systemId, toSys: to.systemId });
-      }
-      const k2 = `${to.systemId}->${from.systemId}`;
-      if (!seen.has(k2)) {
-        seen.add(k2);
-        pairs.push({ fromSys: to.systemId, toSys: from.systemId });
-      }
+function computeShortestBfsJumps(startSystemId, graph) {
+  const dist = new Map();
+  dist.set(startSystemId, 0);
+  const queue = [startSystemId];
+  let head = 0;
+
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const d = dist.get(cur);
+    const neighbors = graph.get(cur);
+    if (!neighbors) continue;
+    for (const nxt of neighbors) {
+      if (dist.has(nxt)) continue;
+      dist.set(nxt, d + 1);
+      queue.push(nxt);
     }
   }
 
-  const routes = {};
-  await runPool(pairs, 10, async ({ fromSys, toSys }) => {
-    try {
-      const [secureRes, shortestRes] = await Promise.all([
-        fetchWithRetry(`https://esi.evetech.net/latest/route/${fromSys}/${toSys}/?flag=secure`),
-        fetchWithRetry(`https://esi.evetech.net/latest/route/${fromSys}/${toSys}/?flag=shortest`),
-      ]);
-      const secureRoute = await secureRes.json();
-      const shortestRoute = await shortestRes.json();
-      routes[`${fromSys}->${toSys}`] = {
-        secureJumps: Math.max(0, secureRoute.length - 1),
-        shortestJumps: Math.max(0, shortestRoute.length - 1),
-      };
-    } catch {
-      // Skip disconnected systems (e.g. Zarzakh / Exordium) that return 404 on ESI /route
-    }
-  });
+  return dist;
+}
 
+function computeRoutesLocally(hubs, allTargetStations, sde) {
+  const routes = {};
+  for (const hub of hubs) {
+    const secureMap = computeBfsJumps(hub.systemId, sde.systems, sde.graph);
+    const shortestMap = computeShortestBfsJumps(hub.systemId, sde.graph);
+    for (const to of allTargetStations) {
+      if (hub.systemId === to.systemId) continue;
+      const secureJumps = secureMap.get(to.systemId);
+      const shortestJumps = shortestMap.get(to.systemId);
+      if (secureJumps === undefined || shortestJumps === undefined) continue;
+      const entry = { secureJumps, shortestJumps };
+      routes[`${hub.systemId}->${to.systemId}`] = entry;
+      routes[`${to.systemId}->${hub.systemId}`] = entry;
+    }
+  }
   return routes;
 }
 
-async function fetch7DayHistory(targetRegionIds) {
-  console.log('Downloading 7-day market history from EVE Ref...');
-  const regionSet = new Set(targetRegionIds.map(Number));
-  const totals = new Map(); // `${regionId}:${typeId}` -> sumVolume
-  const now = new Date();
-  let daysLoaded = 0;
+function computeMedian(values) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
 
-  // Check last 10 UTC days to collect the latest 7 published daily files
+async function fetchMarketHistory(targetRegionIds, sde) {
+  console.log('Downloading 30-day market history from EVE Ref...');
+  const regionSet = new Set(targetRegionIds.map(Number));
+  const now = new Date();
+
+  // Check last 35 UTC days to collect up to 30 published daily files
   const candidateDates = [];
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 35; i++) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
     candidateDates.push(d.toISOString().slice(0, 10));
   }
 
-  for (const dateStr of candidateDates) {
-    if (daysLoaded >= 7) break;
+  // Download in parallel (concurrency 6) and keep only available dates in newest->oldest order
+  const downloaded = await runPool(candidateDates, 6, async (dateStr) => {
     const year = dateStr.slice(0, 4);
     const url = `https://data.everef.net/market-history/${year}/market-history-${dateStr}.csv.bz2`;
     try {
       const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
-      if (!res.ok) continue;
+      if (!res.ok) return null;
       const buf = new Uint8Array(await res.arrayBuffer());
       const csv = Buffer.from(seekBzip.decode(buf)).toString('utf8');
-      const lines = csv.split(/\r?\n/);
-      const headers = lines[0].split(',');
-      const idxVol = headers.indexOf('volume');
-      const idxReg = headers.indexOf('region_id');
-      const idxType = headers.indexOf('type_id');
-
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line) continue;
-        const cols = line.split(',');
-        const regId = Number(cols[idxReg]);
-        if (!regionSet.has(regId)) continue;
-        const typeId = Number(cols[idxType]);
-        const vol = Number(cols[idxVol]) || 0;
-        if (!typeId || vol <= 0) continue;
-
-        const key = `${regId}:${typeId}`;
-        totals.set(key, (totals.get(key) ?? 0) + vol);
-      }
-      daysLoaded++;
+      return { dateStr, csv };
     } catch {
-      // Skip missing day
+      return null;
+    }
+  });
+
+  const validDays = downloaded.filter(Boolean).slice(0, 30); // newest -> oldest
+  const daysLoaded = validDays.length;
+  const days7 = Math.min(7, daysLoaded);
+  const days14 = Math.min(14, daysLoaded);
+
+  // Per `${regId}:${typeId}` accumulate 7d/30d stats + 14d sparkline
+  const statsMap = new Map();
+
+  for (let dayIdx = 0; dayIdx < daysLoaded; dayIdx++) {
+    const { csv } = validDays[dayIdx];
+    const lines = csv.split(/\r?\n/);
+    const headers = lines[0].split(',');
+    const idxVol = headers.indexOf('volume');
+    const idxAvg = headers.indexOf('average');
+    const idxHigh = headers.indexOf('highest');
+    const idxLow = headers.indexOf('lowest');
+    const idxReg = headers.indexOf('region_id');
+    const idxType = headers.indexOf('type_id');
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) continue;
+      const cols = line.split(',');
+      const regId = Number(cols[idxReg]);
+      if (!regionSet.has(regId)) continue;
+      const typeId = Number(cols[idxType]);
+      const vol = Number(cols[idxVol]) || 0;
+      if (!typeId || vol <= 0) continue;
+
+      const avgPrice = Number(cols[idxAvg]) || 0;
+      const high = Number(cols[idxHigh]) || avgPrice;
+      const low = Number(cols[idxLow]) || avgPrice;
+      const buyShare =
+        high > low ? Math.max(0, Math.min(1, (avgPrice - low) / (high - low))) : 1;
+      const buyerVol = vol * buyShare;
+
+      const key = `${regId}:${typeId}`;
+      let rec = statsMap.get(key);
+      if (!rec) {
+        rec = {
+          regId,
+          typeId,
+          sum14: 0,
+          sum30: 0,
+          totalActive14: 0,
+          sellHighWeighted14: 0,
+          sellHighWeighted30: 0,
+          buySum14: 0,
+          buySum30: 0,
+          active14: 0,
+          buyIsk14: 0,
+          buyVols14: new Array(days14).fill(0),
+          buySpark14: new Array(days14).fill(0),
+        };
+        statsMap.set(key, rec);
+      }
+
+      rec.sum30 += vol;
+      rec.sellHighWeighted30 += high * vol;
+      rec.buySum30 += buyerVol;
+      if (dayIdx < days14) {
+        rec.sum14 += vol;
+        rec.totalActive14++;
+        rec.sellHighWeighted14 += high * vol;
+        rec.buySum14 += buyerVol;
+        if (buyerVol >= 0.5) rec.active14++;
+        rec.buyIsk14 += avgPrice * buyerVol;
+        rec.buyVols14[dayIdx] = Math.round(buyerVol * 10) / 10;
+        // Store oldest -> newest
+        rec.buySpark14[days14 - 1 - dayIdx] = Math.round(buyerVol);
+      }
     }
   }
 
   const history7d = {};
+  const historySellPrice7d = {};
+  const historyTrend7d = {};
+  const historyActive14d = {};
+  const byRegionTrending = new Map();
+
   if (daysLoaded > 0) {
-    for (const [key, sumVol] of totals.entries()) {
-      const [regId, typeId] = key.split(':');
-      const avg = sumVol / daysLoaded;
-      const rounded = avg >= 10 ? Math.round(avg) : Math.round(avg * 10) / 10;
-      if (rounded <= 0) continue;
-      if (!history7d[regId]) history7d[regId] = {};
-      history7d[regId][typeId] = rounded;
+    for (const rec of statsMap.values()) {
+      const avg14 = days14 > 0 ? rec.sum14 / days14 : 0;
+      const avg30Total = rec.sum30 / daysLoaded;
+      if (avg14 > 0) {
+        const rounded = avg14 >= 10 ? Math.round(avg14) : Math.round(avg14 * 10) / 10;
+        if (rounded > 0) {
+          if (!history7d[rec.regId]) history7d[rec.regId] = {};
+          history7d[rec.regId][rec.typeId] = rounded;
+        }
+      }
+      if (rec.totalActive14 > 0) {
+        if (!historyActive14d[rec.regId]) historyActive14d[rec.regId] = {};
+        historyActive14d[rec.regId][rec.typeId] = rec.totalActive14;
+      }
+      if (avg30Total > 0) {
+        const trend = Math.round(((avg14 - avg30Total) / avg30Total) * 100);
+        if (!historyTrend7d[rec.regId]) historyTrend7d[rec.regId] = {};
+        historyTrend7d[rec.regId][rec.typeId] = trend;
+      }
+      const avgSellPrice =
+        rec.sum14 > 0 && rec.sellHighWeighted14 > 0
+          ? Math.round((rec.sellHighWeighted14 / rec.sum14) * 100) / 100
+          : rec.sum30 > 0 && rec.sellHighWeighted30 > 0
+          ? Math.round((rec.sellHighWeighted30 / rec.sum30) * 100) / 100
+          : 0;
+      if (avgSellPrice > 0) {
+        if (!historySellPrice7d[rec.regId]) historySellPrice7d[rec.regId] = {};
+        historySellPrice7d[rec.regId][rec.typeId] = avgSellPrice;
+      }
+
+      // Build trending candidates using Buyer-Driven Volume (Median 14d vs Avg 30d)
+      const itemMeta = sde.items[rec.typeId];
+      if (!itemMeta) continue;
+      const buyPressurePct = rec.sum14 > 0 ? (rec.buySum14 / rec.sum14) * 100 : 0;
+      if (buyPressurePct < 50) continue; // Only items mostly bought from Sell Orders
+      const med14 = computeMedian(rec.buyVols14);
+      if (med14 < 10) continue;
+      const avg30 = rec.buySum30 / daysLoaded;
+      if (avg30 <= 0 || med14 <= avg30) continue;
+      if (rec.active14 < 6) continue;
+      const iskVol14d = days14 > 0 ? rec.buyIsk14 / days14 : 0;
+      if (iskVol14d < 500_000) continue;
+
+      const trendPct = ((med14 - avg30) / avg30) * 100;
+      const entry = {
+        regionId: rec.regId,
+        regionName: sde.regions[rec.regId] || String(rec.regId),
+        typeId: rec.typeId,
+        name: itemMeta.n,
+        med7d: Math.round(med14 * 10) / 10,
+        avg30d: Math.round(avg30 * 10) / 10,
+        trendPct: Math.round(trendPct * 10) / 10,
+        activeDays7: rec.active14,
+        iskVol7d: Math.round(iskVol14d),
+        buyPressurePct: Math.round(buyPressurePct),
+        spark14: rec.buySpark14,
+      };
+
+      if (!byRegionTrending.has(rec.regId)) byRegionTrending.set(rec.regId, []);
+      byRegionTrending.get(rec.regId).push(entry);
     }
   }
 
-  console.log(`Loaded ${daysLoaded}-day market history for ${Object.keys(history7d).length} regions.`);
-  return history7d;
+  const trendingItems = [];
+  for (const list of byRegionTrending.values()) {
+    list.sort((a, b) => b.trendPct - a.trendPct);
+    trendingItems.push(...list.slice(0, 80));
+  }
+  trendingItems.sort((a, b) => b.trendPct - a.trendPct);
+
+  const trendingRegions = Array.from(regionSet)
+    .map((id) => ({ id, name: sde.regions[id] || String(id) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  console.log(
+    `Loaded ${daysLoaded}-day market history for ${Object.keys(history7d).length} regions (${trendingItems.length} trending entries).`
+  );
+  return {
+    history7d,
+    historySellPrice7d,
+    historyTrend7d,
+    historyActive14d,
+    trending: {
+      updatedAt: new Date().toISOString(),
+      regions: trendingRegions,
+      items: trendingItems,
+    },
+  };
+}
+
+async function fetchFwLpOffers(sde) {
+  console.log('Fetching FW LP Store offers for 6 militias...');
+  const corporations = await runPool(FW_MILITIAS, 6, async (corp) => {
+    try {
+      const res = await fetchWithRetry(
+        `https://esi.evetech.net/latest/loyalty/stores/${corp.corporationId}/offers/?datasource=tranquility`
+      );
+      const raw = await res.json();
+      if (!Array.isArray(raw)) {
+        return { ...corp, offers: [] };
+      }
+      const offers = [];
+      for (const o of raw) {
+        if (!o || o.lp_cost <= 0 || !sde.items[o.type_id]) continue;
+        offers.push({
+          offerId: o.offer_id,
+          typeId: o.type_id,
+          quantity: o.quantity,
+          lpCost: o.lp_cost,
+          iskCost: o.isk_cost,
+          ...(o.ak_cost > 0 ? { akCost: o.ak_cost } : {}),
+          requiredItems: Array.isArray(o.required_items)
+            ? o.required_items.map((r) => ({ typeId: r.type_id, quantity: r.quantity }))
+            : [],
+        });
+      }
+      return { ...corp, offers };
+    } catch (err) {
+      console.warn(`Failed to fetch LP offers for ${corp.name}:`, err?.message || err);
+      return { ...corp, offers: [] };
+    }
+  });
+
+  const totalOffers = corporations.reduce((acc, c) => acc + c.offers.length, 0);
+  console.log(`Loaded ${totalOffers} marketable FW LP offers across ${corporations.length} militias.`);
+  return {
+    updatedAt: new Date().toISOString(),
+    corporations,
+  };
 }
 
 async function main() {
   const start = Date.now();
   const sde = await loadSdeData();
-  const fwStations = await fetchFwAndActivity(sde);
+  const [fwStations, fwLpOffers] = await Promise.all([
+    fetchFwAndActivity(sde),
+    fetchFwLpOffers(sde),
+  ]);
 
   // Collect ALL High/Low-Sec Empire Regions (security > 0.05) + HUBS + FW
   const regionPagesCache = new Map();
@@ -608,7 +853,7 @@ async function main() {
     accumulateStationStats(pages, sde.stationLookup, stationStatsMap);
   }
 
-  // Rank Top 10 High-Volume NPC Stations
+  // Rank Top 50 High-Volume NPC Stations
   const topStations = Array.from(stationStatsMap.entries())
     .map(([stationId, st]) => {
       const meta = sde.stationLookup.get(stationId);
@@ -628,9 +873,9 @@ async function main() {
       };
     })
     .sort((a, b) => b.orderCount - a.orderCount)
-    .slice(0, 10);
+    .slice(0, 50);
 
-  // Deduplicate all 20 target stations (Top 10 High-Volume + Top 10 FW)
+  // Deduplicate target stations (Top 50 High-Volume + Top 50 FW)
   const targetStationsMap = new Map();
   for (const s of [...topStations, ...fwStations]) {
     if (!targetStationsMap.has(s.stationId)) {
@@ -653,10 +898,8 @@ async function main() {
     Object.assign(ordersByStation, buildStationBooksFromPages(pages, stationIds));
   }
 
-  const [routes, history7d] = await Promise.all([
-    fetchRoutes(HUBS, allTargetStations),
-    fetch7DayHistory(Array.from(regionsToFetch)),
-  ]);
+  const routes = computeRoutesLocally(HUBS, allTargetStations, sde);
+  const { history7d, historySellPrice7d, historyTrend7d, historyActive14d, trending } = await fetchMarketHistory(Array.from(regionsToFetch), sde);
 
   // Build Empire-Wide High/Low-Sec Instant-Sell Candidate Index
   // Reference benchmarks across the 5 Major Hubs so we only keep items that can beat at least one Hub!
@@ -782,6 +1025,9 @@ async function main() {
       routes,
       jumpsFromHubs,
       history7d,
+      historySellPrice7d,
+      historyTrend7d,
+      historyActive14d,
       items: sde.items,
       orders: ordersByStation,
     })
@@ -807,11 +1053,19 @@ async function main() {
     })
   );
 
+  const trendingPath = path.join(outDir, 'market-trending.json');
+  await fs.writeFile(trendingPath, JSON.stringify(trending));
+
+  const fwLpPath = path.join(outDir, 'fw-lp-offers.json');
+  await fs.writeFile(fwLpPath, JSON.stringify(fwLpOffers));
+
   const mSize = ((await fs.stat(marketPath)).size / (1024 * 1024)).toFixed(2);
   const eSize = ((await fs.stat(empirePath)).size / (1024 * 1024)).toFixed(2);
+  const tSize = ((await fs.stat(trendingPath)).size / 1024).toFixed(0);
+  const lpSize = ((await fs.stat(fwLpPath)).size / 1024).toFixed(0);
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   console.log(
-    `Done in ${elapsed}s! Preloaded ${allTargetStations.length} hubs (${mSize} MB) + ${Object.keys(empireStationsMeta).length} High/Low-Sec empire stations (${eSize} MB).`
+    `Done in ${elapsed}s! Preloaded ${allTargetStations.length} hubs (${mSize} MB) + ${Object.keys(empireStationsMeta).length} High/Low-Sec empire stations (${eSize} MB) + ${trending.items.length} trending items (${tSize} KB) + FW LP offers (${lpSize} KB).`
   );
 }
 

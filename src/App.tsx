@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowLeftRight,
   ArrowUpDown,
+  Award,
   Check,
   ChevronDown,
   ChevronRight,
@@ -10,6 +11,7 @@ import {
   Copy,
   ExternalLink,
   Filter,
+  Flame,
   Loader2,
   Package,
   RefreshCw,
@@ -25,6 +27,7 @@ import type {
   ArbitrageOpportunity,
   BuyMethod,
   EmpireInstantDataset,
+  FwLpDataset,
   FwStationInfo,
   HubBook,
   JumpFilter,
@@ -34,11 +37,14 @@ import type {
   StationOption,
   SystemActivity,
   TradeMode,
+  TrendingDataset,
   UniverseStationsData,
 } from './types';
 import { ItemImage } from './components/ItemImage';
 import { OrderBookGrid } from './components/OrderBookGrid';
 import { ALL_HUBS_OPTION, StationSelector } from './components/StationSelector';
+import { LpStorePanel } from './components/LpStorePanel';
+import { TrendingMarketsPanel } from './components/TrendingMarketsPanel';
 import { TripItemModal } from './components/TripItemModal';
 import { TripPlansPanel } from './components/TripPlansPanel';
 import { VolumeComparison } from './components/VolumeComparison';
@@ -46,6 +52,7 @@ import { getTradeTheme } from './utils/theme';
 import {
   calculateAllHubsArbitrage,
   calculateAllOriginHubsArbitrage,
+  calculateAllToAllArbitrage,
   calculateArbitrage,
   formatISK,
   formatInt,
@@ -61,7 +68,7 @@ import {
 import { fetchDestDailyVolume, type DailyVolumeStats } from './utils/history';
 import { getSystemJumpMap, type RoutePreference } from './utils/routing';
 import {
-  generateThreeTripPlans,
+  generateTripPlans,
   type TripItemPick,
   type TripPlan,
 } from './utils/tripPlanner';
@@ -97,22 +104,22 @@ export function App() {
   // Section 0 & 2: Buy/Sell Strategy (Alpha-friendly defaults)
   const [buyMethod, setBuyMethod] = useState<BuyMethod>('instant');
   const [tradeMode, setTradeMode] = useState<TradeMode>('instant');
-  const [maxBudget, setMaxBudget] = useState<number>(70_000_000);
-  const [maxCargo, setMaxCargo] = useState<number>(5_000);
+  const [maxBudget, setMaxBudget] = useState<number>(15_000_000);
+  const [maxCargo, setMaxCargo] = useState<number>(650);
   const [salesTaxPct, setSalesTaxPct] = useState<number>(7.5);
   const [brokerFeePct, setBrokerFeePct] = useState<number>(3.3);
   const [minRoiPct, setMinRoiPct] = useState<number>(5);
-  const [minProfit, setMinProfit] = useState<number>(500_000);
+  const [minProfit, setMinProfit] = useState<number>(3_000);
   const [liquidityTier, setLiquidityTier] = useState<LiquidityTier>('all');
-  const [jumpFilter, setJumpFilter] = useState<JumpFilter>('le15');
-  const [routePref, setRoutePref] = useState<RoutePreference>('highsec');
+  const [jumpFilter, setJumpFilter] = useState<JumpFilter>('all');
+  const routePref: RoutePreference = 'shortest';
   const [skipBaitOrders, setSkipBaitOrders] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState('');
 
   // Section 3: Table & Inline Dropdown Row
   const [sortKey, setSortKey] = useState<SortKey>('tradeScore');
   const [sortAsc, setSortAsc] = useState(false);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [historyStats, setHistoryStats] = useState<DailyVolumeStats | null>(null);
   const [originHistoryStats, setOriginHistoryStats] = useState<DailyVolumeStats | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -122,9 +129,16 @@ export function App() {
   const [copiedPlanId, setCopiedPlanId] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(50);
 
-  // Auto-Fill Ship (3 Trip Plans)
+  // Auto-Fill Ship (5 Trip Plans)
   const [maxStops, setMaxStops] = useState<number>(4);
-  const [showTripPlans, setShowTripPlans] = useState<boolean>(false);
+  const [showTripPlans, setShowTripPlans] = useState<boolean>(true);
+  const [activeTab, setActiveTab] = useState<'arbitrage' | 'trending' | 'lp'>('arbitrage');
+  const [trendingData, setTrendingData] = useState<TrendingDataset | null>(null);
+  const [trendingLoading, setTrendingLoading] = useState(false);
+  const [trendingError, setTrendingError] = useState<string | null>(null);
+  const [lpData, setLpData] = useState<FwLpDataset | null>(null);
+  const [lpLoading, setLpLoading] = useState(false);
+  const [lpError, setLpError] = useState<string | null>(null);
   const [tripPopupItem, setTripPopupItem] = useState<TripItemPick | null>(null);
   const [tripHistoryStats, setTripHistoryStats] = useState<DailyVolumeStats | null>(null);
   const [tripOriginHistoryStats, setTripOriginHistoryStats] = useState<DailyVolumeStats | null>(null);
@@ -369,12 +383,9 @@ export function App() {
       if (tradeMode !== 'instant' || jumpFilter === 'all') return true;
       const j =
         activeJumpMap?.get(systemId) ??
-        (routePref === 'highsec'
-          ? dataset.routes[`${specificStation.systemId}->${systemId}`]?.secureJumps ??
-            dataset.routes[`${systemId}->${specificStation.systemId}`]?.secureJumps ??
-            hubJumps?.[String(systemId)]
-          : dataset.routes[`${specificStation.systemId}->${systemId}`]?.shortestJumps ??
-            dataset.routes[`${systemId}->${specificStation.systemId}`]?.shortestJumps);
+        dataset.routes[`${specificStation.systemId}->${systemId}`]?.shortestJumps ??
+        dataset.routes[`${systemId}->${specificStation.systemId}`]?.shortestJumps ??
+        hubJumps?.[String(systemId)];
       if (j === undefined) return false;
       if (jumpFilter === 'le5') return j <= 5;
       if (jumpFilter === 'le10') return j <= 10;
@@ -418,7 +429,7 @@ export function App() {
   }, [tradeMode, isOriginAll, isDestAll, empireData]);
 
   const rawScan = useMemo(() => {
-    if (!dataset || !originStation || !destStation || isBothAll) {
+    if (!dataset || !originStation || !destStation) {
       return { list: [] as ArbitrageOpportunity[], tripCandidates: [] as ArbitrageOpportunity[] };
     }
     if (!isOriginAll && !originBook) {
@@ -432,11 +443,39 @@ export function App() {
     }
 
     const activeJumpFilter = tradeMode === 'instant' ? jumpFilter : 'all';
+    const trimmedSearch = searchQuery.trim();
+    const keepAllPerItem = trimmedSearch.length >= 2;
+    const scanSearch = keepAllPerItem ? trimmedSearch : '';
 
     let list: ArbitrageOpportunity[] = [];
     const tripCandidates: ArbitrageOpportunity[] = [];
 
-    if (isDestAll && originBook) {
+    if (isBothAll) {
+      const getJumpsBetween = universe
+        ? (fromSys: number, toSys: number) =>
+            getSystemJumpMap(fromSys, universe, routePref)?.get(toSys)
+        : undefined;
+      list = calculateAllToAllArbitrage(
+        dataset,
+        {
+          buyMethod,
+          tradeMode,
+          maxBudget,
+          maxCargo,
+          salesTaxPct,
+          brokerFeePct,
+          minRoiPct,
+          minProfit,
+          liquidityTier,
+          jumpFilter: activeJumpFilter,
+          skipBaitOrders,
+          searchQuery: '',
+        },
+        empireData,
+        getJumpsBetween,
+        tripCandidates
+      );
+    } else if (isDestAll && originBook) {
       list = calculateAllHubsArbitrage(
         dataset,
         originStation.systemId,
@@ -454,13 +493,14 @@ export function App() {
           liquidityTier,
           jumpFilter: activeJumpFilter,
           skipBaitOrders,
-          searchQuery: '',
+          searchQuery: scanSearch,
           originRegionId: originStation.regionId,
         },
         empireData,
         activeJumpMap,
         routePref,
-        tripCandidates
+        tripCandidates,
+        keepAllPerItem
       );
     } else if (isOriginAll && destBook) {
       list = calculateAllOriginHubsArbitrage(
@@ -480,18 +520,18 @@ export function App() {
           liquidityTier,
           jumpFilter: activeJumpFilter,
           skipBaitOrders,
-          searchQuery: '',
+          searchQuery: scanSearch,
           destRegionId: destStation.regionId,
         },
         empireData,
         activeJumpMap,
         routePref,
-        tripCandidates
+        tripCandidates,
+        keepAllPerItem
       );
     } else if (originBook && destBook) {
       const singleJumps =
-        activeJumpMap?.get(destStation.systemId) ??
-        (routePref === 'highsec' ? routeInfo?.secureJumps : routeInfo?.shortestJumps);
+        activeJumpMap?.get(destStation.systemId) ?? routeInfo?.shortestJumps;
       list = calculateArbitrage(dataset, {
         originBook,
         destBook,
@@ -540,6 +580,8 @@ export function App() {
     routePref,
     activeJumpMap,
     skipBaitOrders,
+    universe,
+    searchQuery.trim().length >= 2 ? searchQuery.trim() : '',
     routeInfo?.secureJumps,
     routeInfo?.shortestJumps,
   ]);
@@ -563,8 +605,11 @@ export function App() {
     [opportunities, pageSize]
   );
 
+  const getRowKey = (row: ArbitrageOpportunity) =>
+    `${row.typeId}:${row.originStationId ?? 0}:${row.destStationId ?? 0}`;
+
   const expandedItem = useMemo(
-    () => (expandedId ? opportunities.find((o) => o.typeId === expandedId) ?? null : null),
+    () => (expandedId ? opportunities.find((o) => getRowKey(o) === expandedId) ?? null : null),
     [expandedId, opportunities]
   );
 
@@ -574,7 +619,7 @@ export function App() {
     const origRegId = expandedItem?.originRegionId ?? originStation?.regionId;
     const hasDest = Boolean(destRegId && destRegId !== -1);
     const hasOrig = Boolean(origRegId && origRegId !== -1);
-    if (!expandedId || (!hasDest && !hasOrig)) {
+    if (!expandedItem || (!hasDest && !hasOrig)) {
       setHistoryStats(null);
       setOriginHistoryStats(null);
       setHistoryError(null);
@@ -585,11 +630,11 @@ export function App() {
     setHistoryLoading(true);
     setHistoryError(null);
     Promise.all([
-      hasOrig ? fetchDestDailyVolume(origRegId!, expandedId) : Promise.resolve(null),
+      hasOrig ? fetchDestDailyVolume(origRegId!, expandedItem.typeId) : Promise.resolve(null),
       hasDest
         ? destRegId === origRegId
           ? Promise.resolve(null)
-          : fetchDestDailyVolume(destRegId!, expandedId)
+          : fetchDestDailyVolume(destRegId!, expandedItem.typeId)
         : Promise.resolve(null),
     ])
       .then(([origStats, destStats]) => {
@@ -642,7 +687,8 @@ export function App() {
   };
 
   const handleToggleRow = (row: ArbitrageOpportunity) => {
-    setExpandedId((prev) => (prev === row.typeId ? null : row.typeId));
+    const key = getRowKey(row);
+    setExpandedId((prev) => (prev === key ? null : key));
   };
 
   const handleCopyName = (e: React.MouseEvent, typeId: number, name: string) => {
@@ -687,7 +733,7 @@ export function App() {
 
   const tripPlans = useMemo<TripPlan[] | null>(() => {
     if (!showTripPlans) return null;
-    return generateThreeTripPlans({
+    return generateTripPlans({
       opportunities: rawScan.tripCandidates,
       originStation,
       destStation,
@@ -699,6 +745,7 @@ export function App() {
       maxBudget,
       maxCargo,
       maxStops,
+      minProfit,
     });
   }, [
     showTripPlans,
@@ -713,6 +760,7 @@ export function App() {
     maxBudget,
     maxCargo,
     maxStops,
+    minProfit,
   ]);
 
   const handleGenerateTripPlans = () => {
@@ -777,11 +825,64 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [tripPopupItem]);
 
-  // Clear stale trip plans when route or mode changes
+  // Close stale item popup when route or mode changes (keep trip plans auto-updating)
   useEffect(() => {
-    setShowTripPlans(false);
     setTripPopupItem(null);
   }, [originStation, destStation, buyMethod, tradeMode, jumpFilter, routePref]);
+
+  // Lazy-load 30d regional trending data when user opens Trending Markets tab
+  useEffect(() => {
+    if (activeTab !== 'trending' || trendingData) return;
+    let cancelled = false;
+    setTrendingLoading(true);
+    setTrendingError(null);
+    fetch('/data/market-trending.json')
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<TrendingDataset>;
+      })
+      .then((json) => {
+        if (!cancelled) setTrendingData(json);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setTrendingError(err instanceof Error ? err.message : 'Failed to load trending data');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setTrendingLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, trendingData]);
+
+  // Lazy-load FW LP Store offers when user opens FW LP Store tab
+  useEffect(() => {
+    if (activeTab !== 'lp' || lpData) return;
+    let cancelled = false;
+    setLpLoading(true);
+    setLpError(null);
+    fetch('/data/fw-lp-offers.json')
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} loading fw-lp-offers.json`);
+        return res.json() as Promise<FwLpDataset>;
+      })
+      .then((json) => {
+        if (!cancelled) setLpData(json);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLpError(err instanceof Error ? err.message : 'Failed to load FW LP Store data');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLpLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, lpData]);
 
   const updatedLabel = useMemo(() => {
     if (!dataset?.updatedAt) return '';
@@ -800,7 +901,7 @@ export function App() {
   );
 
   const isFetchingRegion = Boolean(originProgress || destProgress);
-  const theme = getTradeTheme(buyMethod, tradeMode);
+  const theme = getTradeTheme(buyMethod, tradeMode, activeTab);
 
   return (
     <div className={`min-h-screen ${theme.pageBg} text-slate-200 flex flex-col transition-colors duration-300`}>
@@ -822,6 +923,46 @@ export function App() {
               </p>
             </div>
           </div>
+
+          {/* Primary Tab Switcher */}
+          <nav className="flex items-center gap-1.5 bg-slate-900/80 border border-slate-800 rounded-lg p-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('arbitrage')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
+                activeTab === 'arbitrage'
+                  ? theme.pillActive
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>Arbitrage</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('trending')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
+                activeTab === 'trending'
+                  ? theme.pillActive
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Flame className="w-3.5 h-3.5" />
+              <span>Trending 14d+</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('lp')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
+                activeTab === 'lp'
+                  ? theme.pillActive
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>FW LP Store</span>
+            </button>
+          </nav>
 
           <div className="flex items-center gap-2 sm:gap-3">
             <button
@@ -913,7 +1054,56 @@ export function App() {
             <span>Ad Space<br />140×600</span>
           </aside>
 
-          {/* Center 2-Column Workspace: Left (0, 1, 2) | Right (3) */}
+          {/* Center Workspace */}
+          {activeTab === 'lp' ? (
+            <div className="flex-1 min-w-0">
+              <LpStorePanel
+                theme={theme}
+                data={lpData}
+                dataset={dataset}
+                universe={universe}
+                salesTaxPct={salesTaxPct}
+                brokerFeePct={brokerFeePct}
+                maxCargo={maxCargo}
+                loading={lpLoading}
+                error={lpError}
+                onOpenInArbitrage={(itemName, stationId) => {
+                  const targetStation =
+                    dataset?.topStations.find((s) => s.stationId === stationId) ??
+                    dataset?.fwStations?.find((s) => s.stationId === stationId) ??
+                    ALL_HUBS_OPTION;
+                  setOriginStation(ALL_HUBS_OPTION);
+                  setDestStation(targetStation);
+                  setSearchQuery(itemName);
+                  setExpandedId(null);
+                  setActiveTab('arbitrage');
+                }}
+              />
+            </div>
+          ) : activeTab === 'trending' ? (
+            <div className="flex-1 min-w-0">
+              <TrendingMarketsPanel
+                theme={theme}
+                data={trendingData}
+                dataset={dataset}
+                salesTaxPct={salesTaxPct}
+                brokerFeePct={brokerFeePct}
+                loading={trendingLoading}
+                error={trendingError}
+                onSearchAllToDest={(itemName, regionId) => {
+                  const targetStation =
+                    dataset?.topStations.find((s) => s.regionId === regionId) ??
+                    dataset?.fwStations?.find((s) => s.regionId === regionId) ??
+                    ALL_HUBS_OPTION;
+                  setOriginStation(ALL_HUBS_OPTION);
+                  setDestStation(targetStation);
+                  setSearchQuery(itemName);
+                  setExpandedId(null);
+                  setActiveTab('arbitrage');
+                }}
+              />
+            </div>
+          ) : (
           <div className="flex-1 min-w-0 grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)] 2xl:grid-cols-[360px_minmax(0,1fr)] gap-4 items-start">
             <div className="space-y-4">
               {/* ============================================================ */}
@@ -965,7 +1155,7 @@ export function App() {
                       }`}
                     >
                       <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      <span className="truncate">Buyer (Buy Order)</span>
+                      <span className="truncate">Buy Order</span>
                     </button>
                   </div>
                 </div>
@@ -1024,27 +1214,6 @@ export function App() {
                           }`}
                         >
                           {jf.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs text-slate-400 mr-1">Security:</span>
-                      {(
-                        [
-                          { label: 'High-Sec Safe', val: 'highsec' },
-                          { label: 'Shortest (Low/Null)', val: 'shortest' },
-                        ] as { label: string; val: RoutePreference }[]
-                      ).map((rp) => (
-                        <button
-                          key={rp.val}
-                          type="button"
-                          onClick={() => setRoutePref(rp.val)}
-                          className={`px-2.5 py-1 rounded-md text-xs font-medium border transition cursor-pointer ${
-                            routePref === rp.val ? theme.pillActive : theme.pillInactive
-                          }`}
-                        >
-                          {rp.label}
                         </button>
                       ))}
                     </div>
@@ -1128,21 +1297,36 @@ export function App() {
           )}
 
           {isBothAll ? (
-            <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
-              Please select at least one specific Origin or Destination station.
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300 bg-[#090d16]/70 border border-cyan-500/25 rounded-lg px-3.5 py-2.5">
+              <span className="font-semibold text-cyan-300">
+                {tradeMode === 'instant'
+                  ? `All-to-All Empire Scan${empireData ? ` (${formatInt(Object.keys(empireData.stations).length + (dataset ? Object.keys(dataset.orders).length : 98))} stations)` : ''}:`
+                  : `All-to-All Hubs & FW Scan (${dataset ? Object.keys(dataset.orders).length : 98} stations):`}
+              </span>
+              <span>
+                Finding best Station A → Station B trades across{' '}
+                {tradeMode === 'instant'
+                  ? 'all High/Low-Sec NPC stations.'
+                  : `${dataset ? Object.keys(dataset.orders).length : 98} Volume & FW hubs (switch to Instant Sell to scan all High/Low-Sec).`}
+              </span>
+              {empireLoading && (
+                <span className="text-cyan-400 inline-flex items-center gap-1 ml-auto">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading empire stations...
+                </span>
+              )}
             </div>
           ) : isDestAll ? (
             <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300 bg-[#090d16]/70 border border-cyan-500/25 rounded-lg px-3.5 py-2.5">
               <span className="font-semibold text-cyan-300">
                 {tradeMode === 'instant'
-                  ? `All High/Low-Sec Scan${empireData ? ` (${formatInt(Object.keys(empireData.stations).length + 19)} stations)` : ''}:`
-                  : 'Top 20 Hubs Scan:'}
+                  ? `All High/Low-Sec Scan${empireData ? ` (${formatInt(Object.keys(empireData.stations).length + Math.max(0, (dataset ? Object.keys(dataset.orders).length : 107) - 1))} stations)` : ''}:`
+                  : `Top Hubs & FW Scan (${dataset ? Object.keys(dataset.orders).length : 107} stations):`}
               </span>
               <span>
                 Comparing <strong className="text-white">{originStation?.stationName}</strong>{' '}
                 {tradeMode === 'instant'
                   ? 'against all High/Low-Sec NPC stations.'
-                  : 'against Top 20 hubs (switch to Instant Sell to scan all High/Low-Sec).'}
+                  : `against ${dataset ? Object.keys(dataset.orders).length : 107} Volume & FW hubs (switch to Instant Sell to scan all High/Low-Sec).`}
               </span>
               {empireLoading && (
                 <span className="text-cyan-400 inline-flex items-center gap-1 ml-auto">
@@ -1154,13 +1338,13 @@ export function App() {
             <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300 bg-[#090d16]/70 border border-cyan-500/25 rounded-lg px-3.5 py-2.5">
               <span className="font-semibold text-cyan-300">
                 {tradeMode === 'instant'
-                  ? `All High/Low-Sec Scan${empireData ? ` (${formatInt(Object.keys(empireData.stations).length + 19)} stations)` : ''}:`
-                  : 'Top 20 Hubs Scan:'}
+                  ? `All High/Low-Sec Scan${empireData ? ` (${formatInt(Object.keys(empireData.stations).length + Math.max(0, (dataset ? Object.keys(dataset.orders).length : 107) - 1))} stations)` : ''}:`
+                  : `Top Hubs & FW Scan (${dataset ? Object.keys(dataset.orders).length : 107} stations):`}
               </span>
               <span>
                 {tradeMode === 'instant'
                   ? 'Scanning all High/Low-Sec NPC stations for cheapest sellers to '
-                  : 'Scanning Top 20 hubs for sellers to '}
+                  : `Scanning ${dataset ? Object.keys(dataset.orders).length : 107} Volume & FW hubs for sellers to `}
                 <strong className="text-white">{destStation?.stationName}</strong>
                 {tradeMode === 'patient' && ' (switch to Instant Sell to scan all High/Low-Sec)'}.
               </span>
@@ -1271,10 +1455,11 @@ export function App() {
               />
               <div className="flex gap-1 mt-1.5">
                 {[
-                  { label: '70M', val: 70_000_000 },
-                  { label: '200M', val: 200_000_000 },
-                  { label: '500M', val: 500_000_000 },
-                  { label: '∞', val: 0 },
+                  { label: '1M', val: 1_000_000 },
+                  { label: '5M', val: 5_000_000 },
+                  { label: '15M', val: 15_000_000 },
+                  { label: '60M', val: 60_000_000 },
+                  { label: '100M', val: 100_000_000 },
                 ].map((p) => (
                   <button
                     key={p.label}
@@ -1299,17 +1484,18 @@ export function App() {
               <input
                 type="number"
                 min={0}
-                step={500}
+                step={50}
                 value={maxCargo}
                 onChange={(e) => setMaxCargo(Math.max(0, Number(e.target.value)))}
                 className="w-full bg-[#090d16] border border-slate-700/80 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500"
               />
               <div className="flex gap-1 mt-1.5">
                 {[
+                  { label: '200', val: 200, title: 'Frigate / Shuttle' },
+                  { label: '400', val: 400, title: 'Frigate (Expanded)' },
+                  { label: '650', val: 650, title: 'Destroyer / Sunesis' },
+                  { label: '1k', val: 1_000, title: 'Cruiser / Fast Hauler' },
                   { label: '5k', val: 5_000, title: 'T1 Industrial' },
-                  { label: '10k', val: 10_000, title: 'Blockade Runner / DST' },
-                  { label: '60k', val: 60_000, title: 'DST Fleet Hangar' },
-                  { label: '∞', val: 0, title: 'Unlimited' },
                 ].map((p) => (
                   <button
                     key={p.label}
@@ -1411,7 +1597,7 @@ export function App() {
           {/* Liquidity & Anti-Bait Filter Bar */}
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-slate-400 mr-1">Min Liquidity (7d Avg/d):</span>
+              <span className="text-xs text-slate-400 mr-1">Min Liquidity (14d Avg/d):</span>
               {(
                 [
                   {
@@ -1594,7 +1780,7 @@ export function App() {
                 {loading || isFetchingRegion ? (
                   <tr>
                     <td
-                      colSpan={isOriginAll || isDestAll ? 8 : 7}
+                      colSpan={7 + (isOriginAll ? 1 : 0) + (isDestAll ? 1 : 0)}
                       className="py-16 text-center text-slate-400"
                     >
                       Loading station market data...
@@ -1603,7 +1789,7 @@ export function App() {
                 ) : visibleRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={isOriginAll || isDestAll ? 8 : 7}
+                      colSpan={7 + (isOriginAll ? 1 : 0) + (isDestAll ? 1 : 0)}
                       className="py-16 text-center text-slate-400"
                     >
                       No profitable trades match your current filters. Try lowering Min ROI or Min Profit.
@@ -1611,9 +1797,10 @@ export function App() {
                   </tr>
                 ) : (
                   visibleRows.map((row) => {
-                    const isExpanded = expandedId === row.typeId;
+                    const rowKey = getRowKey(row);
+                    const isExpanded = expandedId === rowKey;
                     return (
-                      <Fragment key={row.typeId}>
+                      <Fragment key={rowKey}>
                         <tr
                           onClick={() => handleToggleRow(row)}
                           className={`transition cursor-pointer group ${
@@ -1648,7 +1835,13 @@ export function App() {
                                   <span
                                     title={
                                       row.avg7d !== null
-                                        ? `7-Day Avg: ${row.avg7d}/day | Dest Buy Vol: ${formatInt(row.destBuyVol)}`
+                                        ? `14-Day Avg: ${row.avg7d}/day${
+                                            row.activeDays14d != null ? ` (${row.activeDays14d}/14d active)` : ''
+                                          }${
+                                            row.trendPct != null
+                                              ? ` (${row.trendPct >= 0 ? `+${row.trendPct}%` : `${row.trendPct}%`} vs 30d)`
+                                              : ''
+                                          } | Dest Buy Vol: ${formatInt(row.destBuyVol)}`
                                         : `Dest Buy Vol: ${formatInt(row.destBuyVol)}`
                                     }
                                     className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
@@ -1758,7 +1951,23 @@ export function App() {
 
                           <td className="py-3 px-3 text-center tabular-nums">
                             <div
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold border ${
+                              title={
+                                row.scoreBreakdown
+                                  ? [
+                                      `Liquidity: ${row.scoreBreakdown.liq}/45`,
+                                      `Profit: ${row.scoreBreakdown.profit}/33`,
+                                      `ROI: ${row.scoreBreakdown.roi}/8`,
+                                      `Jump/Speed: ${row.scoreBreakdown.jump}/14`,
+                                      row.scoreBreakdown.trend !== 0
+                                        ? `Trend: ${row.scoreBreakdown.trend > 0 ? `+${row.scoreBreakdown.trend}` : row.scoreBreakdown.trend} (±20)`
+                                        : null,
+                                      row.scoreBreakdown.note ? `Cap/Adj: ${row.scoreBreakdown.note}` : null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join('\n')
+                                  : `Score ${row.tradeScore}/100`
+                              }
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold border cursor-help ${
                                 row.tradeScore >= 75
                                   ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
                                   : row.tradeScore >= 55
@@ -1772,7 +1981,7 @@ export function App() {
                             </div>
                             <div className="text-[10px] text-slate-500 mt-0.5">
                               {row.avg7d !== null
-                                ? `7d: ${row.avg7d}/d`
+                                ? `14d: ${row.avg7d}/d`
                                 : `Buy: ${formatInt(row.destBuyVol)}`}
                             </div>
                           </td>
@@ -1882,11 +2091,11 @@ export function App() {
                         {/* Inline Dropdown Detail Row */}
                         {isExpanded && (
                           <tr
-                            id={`expanded-${row.typeId}`}
+                            id={`expanded-${rowKey}`}
                             className={`border-b ${theme.expandedRow}`}
                           >
                             <td
-                              colSpan={isOriginAll || isDestAll ? 8 : 7}
+                              colSpan={7 + (isOriginAll ? 1 : 0) + (isDestAll ? 1 : 0)}
                               className="p-4 sm:p-5"
                             >
                               <div className="space-y-4">
@@ -1941,8 +2150,12 @@ export function App() {
                                 {/* Compact 2-Column Order Book */}
                                 <OrderBookGrid
                                   opp={row}
+                                  buyMethod={buyMethod}
+                                  tradeMode={tradeMode}
                                   originSystemFallback={originStation?.systemName}
                                   destSystemFallback={destStation?.systemName}
+                                  originStats={originHistoryStats}
+                                  destStats={historyStats}
                                 />
 
                                 {/* Daily Trading Volume: Origin & Destination (ESI 30d History) */}
@@ -1980,6 +2193,7 @@ export function App() {
           </section>
             </div>
           </div>
+          )}
 
           {/* Right Side Ad Margin */}
           <aside
@@ -1995,6 +2209,8 @@ export function App() {
       {tripPopupItem && (
         <TripItemModal
           item={tripPopupItem}
+          buyMethod={buyMethod}
+          tradeMode={tradeMode}
           originStation={originStation}
           destStation={destStation}
           originStats={tripOriginHistoryStats}

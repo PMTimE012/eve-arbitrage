@@ -14,6 +14,8 @@ dist-ssr
 public/data/market-hubs.json
 public/data/universe-stations.json
 public/data/empire-instant.json
+public/data/market-trending.json
+public/data/fw-lp-offers.json
 
 # Editor directories and files
 .vscode/*

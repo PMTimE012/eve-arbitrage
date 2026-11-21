@@ -1,4 +1,4 @@
-import { formatISK, formatInt } from '../utils/arbitrage';
+import { classifyBookLiquidity, formatISK, formatInt, type LiquidityRank } from '../utils/arbitrage';
 import type { DailyVolumeStats } from '../utils/history';
 
 interface VolumeComparisonProps {
@@ -28,27 +28,33 @@ function VolumeCard({
     <div className="rounded-xl bg-[#0e1526] border border-slate-800 p-3">
       <div className="flex items-center justify-between gap-2 mb-2">
         <span className="text-[11px] font-semibold text-slate-200 truncate">{label}</span>
-        {stats && !loading && (
-          <span
-            className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
-              stats.avg7d >= Math.max(20, qty * 1.5)
-                ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                : stats.avg7d >= Math.max(5, qty * 0.5)
-                ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
-                : stats.avg7d >= 1
-                ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
-            }`}
-          >
-            {stats.avg7d >= Math.max(20, qty * 1.5)
-              ? 'High'
-              : stats.avg7d >= Math.max(5, qty * 0.5)
-              ? 'Good'
-              : stats.avg7d >= 1
-              ? 'Moderate'
-              : 'Low (<1/d)'}
-          </span>
-        )}
+        {stats && !loading && (() => {
+          const rank: LiquidityRank = classifyBookLiquidity(
+            stats.avg7d,
+            0,
+            0,
+            qty,
+            false,
+            stats.trendPct,
+            stats.activeDays7d
+          );
+          const badgeStyle =
+            rank === 'High'
+              ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+              : rank === 'Good'
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+              : rank === 'Moderate'
+              ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+              : 'bg-rose-500/15 text-rose-300 border border-rose-500/30';
+          return (
+            <span
+              title="Region liquidity using 14d Avg/d + Trend % (unified with table)"
+              className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${badgeStyle}`}
+            >
+              {rank === 'Low' && stats.avg7d < 1 ? 'Low (<1/d)' : rank}
+            </span>
+          );
+        })()}
       </div>
       {loading ? (
         <div className="text-[11px] text-slate-400 py-1">Loading 30d history...</div>
@@ -56,38 +62,102 @@ function VolumeCard({
         <div className="text-[11px] text-rose-400 py-1">{error}</div>
       ) : stats ? (
         <div className="space-y-2">
-          <div className="grid grid-cols-3 gap-2 text-[11px] tabular-nums">
+          <div className="grid grid-cols-4 gap-2 text-[11px] tabular-nums">
             <div>
-              <div className="text-[10px] text-slate-500">7d Avg/d</div>
-              <div className="font-bold text-white">{stats.avg7d.toFixed(1)}</div>
+              <div className="text-[10px] text-slate-500">14d Avg/d</div>
+              <div className="font-bold text-white flex items-center gap-1 flex-wrap">
+                <span>{stats.avg7d.toFixed(1)}</span>
+                {stats.trendPct !== null && (
+                  <span
+                    title={`14d vs 30d (${stats.avg30d.toFixed(1)}/d)`}
+                    className={`text-[9px] font-semibold ${
+                      stats.trendPct >= 10
+                        ? 'text-emerald-400'
+                        : stats.trendPct <= -10
+                        ? 'text-rose-400'
+                        : 'text-slate-400'
+                    }`}
+                  >
+                    {stats.trendPct >= 0 ? `+${stats.trendPct.toFixed(0)}%↑` : `${stats.trendPct.toFixed(0)}%↓`}
+                  </span>
+                )}
+              </div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500">30d Avg/d</div>
-              <div className="font-bold text-slate-200">{stats.avg30d.toFixed(1)}</div>
+              <div className="text-[10px] text-slate-500">Active (14d)</div>
+              <div
+                className={`font-bold ${
+                  stats.activeDays7d >= 10
+                    ? 'text-emerald-400'
+                    : stats.activeDays7d >= 4
+                    ? 'text-amber-300'
+                    : 'text-rose-400'
+                }`}
+              >
+                {stats.activeDays7d}/14d
+              </div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500">Region Avg</div>
+              <div className="text-[10px] text-slate-500">ISK Vol/d</div>
               <div className="font-bold text-cyan-300">
-                {stats.lastAvgPrice !== null ? formatISK(stats.lastAvgPrice, true) : 'N/A'}
+                {stats.iskVol7d > 0 ? formatISK(stats.iskVol7d, true) : '0'}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500">Last Trade</div>
+              <div
+                title={stats.lastTradeDate ?? undefined}
+                className={`font-bold ${
+                  stats.daysSinceLastTrade === null
+                    ? 'text-slate-500'
+                    : stats.daysSinceLastTrade <= 1
+                    ? 'text-emerald-400'
+                    : stats.daysSinceLastTrade <= 3
+                    ? 'text-amber-300'
+                    : 'text-rose-400'
+                }`}
+              >
+                {stats.daysSinceLastTrade === null
+                  ? 'None'
+                  : stats.daysSinceLastTrade === 0
+                  ? 'Today'
+                  : `${stats.daysSinceLastTrade}d ago`}
               </div>
             </div>
           </div>
-          <div className="h-8 flex items-end gap-0.5">
-            {(() => {
-              const maxVol = Math.max(1, ...stats.last14Days.map((d) => d.volume));
-              return stats.last14Days.map((d) => {
-                const hPct = Math.max(8, Math.round((d.volume / maxVol) * 100));
-                return (
-                  <div
-                    key={d.date}
-                    title={`${d.date}: ${formatInt(d.volume)} units (Avg ${formatISK(d.average, true)})`}
-                    className="flex-1 bg-cyan-500/35 hover:bg-cyan-400/80 rounded-t transition-all"
-                    style={{ height: `${d.volume === 0 ? 8 : hPct}%` }}
-                  />
-                );
-              });
-            })()}
-          </div>
+
+          {(() => {
+            const maxVol = Math.max(1, ...stats.last14Days.map((d) => d.volume));
+            return (
+              <div className="space-y-1">
+                <div className="h-8 flex items-end gap-0.5">
+                  {stats.last14Days.map((d, idx) => {
+                    const isLast = idx === stats.last14Days.length - 1;
+                    const hPct = Math.max(10, Math.round((d.volume / maxVol) * 100));
+                    const barColor =
+                      d.volume === 0
+                        ? 'bg-slate-800/80 hover:bg-slate-700'
+                        : isLast
+                        ? 'bg-emerald-400/75 hover:bg-emerald-300'
+                        : 'bg-cyan-500/45 hover:bg-cyan-400/85';
+                    return (
+                      <div
+                        key={d.date}
+                        title={`${d.date}: ${formatInt(d.volume)} units (Avg ${formatISK(d.average, true)})`}
+                        className={`flex-1 rounded-t transition-all ${barColor}`}
+                        style={{ height: `${d.volume === 0 ? 10 : hPct}%` }}
+                      />
+                    );
+                  })}
+                </div>
+                <div className="flex items-center justify-between text-[9px] text-slate-500 tabular-nums">
+                  <span>14d ago</span>
+                  <span>Peak: {formatInt(Math.max(0, ...stats.last14Days.map((d) => d.volume)))}/d</span>
+                  <span>Today</span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       ) : (
         <div className="text-[11px] text-slate-500 py-1">No region history</div>

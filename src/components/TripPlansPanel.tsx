@@ -1,4 +1,4 @@
-import { Check, Copy, Skull, Sparkles } from 'lucide-react';
+import { Check, Copy, Sparkles } from 'lucide-react';
 import type React from 'react';
 import { formatISK, formatInt } from '../utils/arbitrage';
 import type { TradeTheme } from '../utils/theme';
@@ -39,7 +39,7 @@ export function TripPlansPanel({
 }: TripPlansPanelProps) {
   return (
     <>
-      {/* Auto-Fill Ship (3 Trip Plans) Bar */}
+      {/* Auto-Fill Ship (5 Trip Plans) Bar */}
       <div className={`px-4 sm:px-5 py-3 border-b ${theme.sectionHead} flex flex-wrap items-center justify-between gap-3`}>
         <div className="flex flex-wrap items-center gap-2.5">
           <button
@@ -49,7 +49,7 @@ export function TripPlansPanel({
             className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${theme.pillActive}`}
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Auto-Fill Ship (Generate 3 Plans)</span>
+            <span>Auto Trip Plans (Top 5 • ISK/Jump)</span>
           </button>
 
           <div className="flex items-center gap-1.5 text-xs">
@@ -80,24 +80,24 @@ export function TripPlansPanel({
         )}
       </div>
 
-      {/* 3 Generated Trip Plans Grid */}
+      {/* 5 Generated Trip Plans Grid */}
       {tripPlans && (
-        <div className={`p-4 sm:p-5 border-b ${theme.sectionHead}`}>
+        <div className={`p-3 sm:p-4 border-b ${theme.sectionHead}`}>
           {tripPlans.length === 0 ? (
             <div className="text-xs text-slate-400 text-center py-4">
               Could not build trip plans with current filters. Try relaxing Min ROI or Min Profit.
             </div>
           ) : (
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               {tripPlans.map((plan) => (
                 <div
                   key={plan.id}
-                  className={`rounded-xl border p-4 flex flex-col gap-3 ${theme.subCard}`}
+                  className={`rounded-xl border p-3 flex flex-col gap-2.5 min-w-0 ${theme.subCard}`}
                 >
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start justify-between gap-1.5">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-bold text-white truncate">{plan.title}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs font-bold text-white truncate">{plan.title}</span>
                         <button
                           type="button"
                           onClick={() => onCopyPlan(plan)}
@@ -105,62 +105,56 @@ export function TripPlansPanel({
                           className="p-0.5 text-slate-500 hover:text-white cursor-pointer shrink-0 transition"
                         >
                           {copiedPlanId === plan.id ? (
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <Check className="w-3 h-3 text-emerald-400" />
                           ) : (
-                            <Copy className="w-3.5 h-3.5" />
+                            <Copy className="w-3 h-3" />
                           )}
                         </button>
                       </div>
-                      <div className="text-[11px] text-slate-400">{plan.subtitle}</div>
+                      <div className="text-[10px] text-slate-400 truncate">{plan.subtitle}</div>
                     </div>
-                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded border shrink-0 ${theme.pillActive}`}>
-                      Avg Score {plan.avgScore}
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${theme.pillActive}`}>
+                      Score {plan.avgScore}
                     </span>
                   </div>
 
                   {/* Plan KPIs */}
-                  <div className="grid grid-cols-3 gap-2 text-xs bg-black/25 rounded-lg p-2.5 border border-white/5 tabular-nums">
-                    <div>
-                      <div className="text-[10px] text-slate-400">Net Profit</div>
-                      <div className="font-bold text-emerald-400">
-                        +{formatISK(plan.totalProfit, true)}
+                  {(() => {
+                    const roiOnUsedPct = plan.totalCost > 0 ? (plan.totalProfit / plan.totalCost) * 100 : 0;
+                    const profitColor =
+                      roiOnUsedPct >= 200
+                        ? 'text-rose-400'
+                        : roiOnUsedPct >= 100
+                        ? 'text-amber-400'
+                        : roiOnUsedPct >= 40
+                        ? 'text-emerald-400'
+                        : roiOnUsedPct >= 15
+                        ? 'text-cyan-300'
+                        : 'text-slate-300';
+                    return (
+                      <div className="grid grid-cols-3 gap-1.5 text-[11px] bg-black/25 rounded-lg p-2 border border-white/5 tabular-nums">
+                        <div title={`ROI on actual budget used: ${roiOnUsedPct.toFixed(1)}%`}>
+                          <div className="text-[10px] text-slate-400">Net Profit</div>
+                          <div className={`font-bold ${profitColor}`}>
+                            +{formatISK(plan.totalProfit, true)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-400">Route / ISK·j</div>
+                          <div className="font-semibold text-white">
+                            {plan.totalJumps}j • {formatISK(plan.iskPerJump, true)}/j
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-400">Cargo / Budget</div>
+                          <div className="font-semibold text-slate-200">
+                            {plan.cargoFillPct !== null ? `${plan.cargoFillPct.toFixed(0)}%` : '∞'} /{' '}
+                            {plan.budgetUsedPct !== null ? `${plan.budgetUsedPct.toFixed(0)}%` : '∞'}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-slate-400">Route / ISK·j</div>
-                      <div className="font-semibold text-white">
-                        {plan.totalJumps}j • {formatISK(plan.iskPerJump, true)}/j
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-slate-400">Cargo / Budget</div>
-                      <div className="font-semibold text-slate-200">
-                        {plan.cargoFillPct !== null ? `${plan.cargoFillPct.toFixed(0)}%` : '∞'} /{' '}
-                        {plan.budgetUsedPct !== null ? `${plan.budgetUsedPct.toFixed(0)}%` : '∞'}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Route Safety / 1h Ship Kills along full path */}
-                  <div
-                    className={`flex items-center justify-between text-[11px] px-2.5 py-1.5 rounded-lg border tabular-nums ${
-                      plan.routeShipKills1h >= 15
-                        ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                        : plan.routeShipKills1h >= 3
-                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                        : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                    }`}
-                  >
-                    <span className="inline-flex items-center gap-1.5 font-medium">
-                      <Skull className="w-3.5 h-3.5 shrink-0" />
-                      <span>Route Kills (1h): {formatInt(plan.routeShipKills1h)} ships</span>
-                    </span>
-                    {plan.hottestSystem && (
-                      <span className="text-[10px] opacity-85 truncate max-w-[140px]">
-                        Hot: {plan.hottestSystem.name} ({plan.hottestSystem.kills})
-                      </span>
-                    )}
-                  </div>
+                    );
+                  })()}
 
                   {/* Stops & Items */}
                   <div className="space-y-2.5 text-xs flex-1">
@@ -257,18 +251,18 @@ export function TripPlansPanel({
                         </div>
                       </div>
                     ))}
-
-                    {plan.finalDestName && (
-                      <div className="flex items-center justify-between text-[11px] px-2.5 py-1.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-300">
-                        <span className="truncate font-medium">
-                          → Deliver to {plan.finalDestName}
-                        </span>
-                        <span className="shrink-0 tabular-nums font-semibold">
-                          +{plan.jumpsToFinalDest}j
-                        </span>
-                      </div>
-                    )}
                   </div>
+
+                  {plan.finalDestName && (
+                    <div className="mt-auto flex items-center justify-between text-[11px] px-2.5 py-1.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-300">
+                      <span className="truncate font-medium">
+                        → Deliver to {plan.finalDestName}
+                      </span>
+                      <span className="shrink-0 tabular-nums font-semibold">
+                        +{plan.jumpsToFinalDest}j
+                      </span>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

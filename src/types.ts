@@ -93,6 +93,9 @@ export interface MarketDataset {
   routes: Record<string, RouteInfo>;
   jumpsFromHubs?: Record<string, Record<string, number>>;
   history7d?: Record<string, Record<string, number>>;
+  historySellPrice7d?: Record<string, Record<string, number>>;
+  historyTrend7d?: Record<string, Record<string, number>>;
+  historyActive14d?: Record<string, Record<string, number>>;
   items: Record<string, ItemMeta>;
   orders: Record<string, Record<string, HubBook>>;
 }
@@ -153,9 +156,19 @@ export interface ArbitrageOpportunity {
   cargoFillPct: number | null;
   totalProfit: number;
   tradeScore: number;
+  scoreBreakdown?: {
+    liq: number;
+    profit: number;
+    roi: number;
+    jump: number;
+    trend: number;
+    note?: string;
+  };
   scoreLabel: 'High' | 'Good' | 'Moderate' | 'Risky';
   liquidityLabel: 'High' | 'Good' | 'Moderate' | 'Low';
   avg7d: number | null;
+  trendPct?: number | null;
+  activeDays14d?: number | null;
   originSellVol: number;
   originBuyVol: number;
   destBuyVol: number;
@@ -178,4 +191,52 @@ export interface ArbitrageOpportunity {
   destRegionId?: number;
   destRegionName?: string;
   destJumps?: number;
+}
+
+export interface TrendingMarketItem {
+  regionId: number;
+  regionName: string;
+  typeId: number;
+  name: string;
+  med7d: number;
+  avg30d: number;
+  trendPct: number;
+  activeDays7: number;
+  iskVol7d: number;
+  buyPressurePct?: number;
+  spark14: number[];
+}
+
+export interface TrendingDataset {
+  updatedAt: string;
+  regions: { id: number; name: string }[];
+  items: TrendingMarketItem[];
+}
+
+export interface FwLpRequiredItem {
+  typeId: number;
+  quantity: number;
+}
+
+export interface FwLpOffer {
+  offerId: number;
+  typeId: number;
+  quantity: number;
+  lpCost: number;
+  iskCost: number;
+  akCost?: number;
+  requiredItems: FwLpRequiredItem[];
+}
+
+export interface FwLpCorporation {
+  corporationId: number;
+  name: string;
+  factionName: string;
+  shortName: string;
+  offers: FwLpOffer[];
+}
+
+export interface FwLpDataset {
+  updatedAt: string;
+  corporations: FwLpCorporation[];
 }
