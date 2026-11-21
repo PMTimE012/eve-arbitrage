@@ -951,28 +951,32 @@ export function calculateAllToAllArbitrage(
     price: number;
   }
 
-  // Keep top 2 best origin & top 2 best dest stations per typeId
+  const majorHubIds = new Set(dataset.hubs.map((h) => h.stationId));
+
+  // Keep top N best origin & dest stations per typeId, always retaining the 5 Major Hubs
   const bestOrigins = new Map<string, ExtremumEntry[]>();
   const bestDests = new Map<string, ExtremumEntry[]>();
 
-  const pushMin2 = (map: Map<string, ExtremumEntry[]>, key: string, entry: ExtremumEntry) => {
+  const pushMinN = (map: Map<string, ExtremumEntry[]>, key: string, entry: ExtremumEntry, limit = 4) => {
     let arr = map.get(key);
     if (!arr) {
       map.set(key, [entry]);
       return;
     }
-    if (arr.length === 1) {
-      if (entry.price < arr[0].price) arr.unshift(entry);
-      else arr.push(entry);
-    } else if (entry.price < arr[0].price) {
-      arr[1] = arr[0];
-      arr[0] = entry;
-    } else if (entry.price < arr[1].price) {
-      arr[1] = entry;
+    arr.push(entry);
+    arr.sort((a, b) => a.price - b.price);
+    if (arr.length > limit) {
+      const kept: ExtremumEntry[] = [];
+      for (const item of arr) {
+        if (kept.length < limit || majorHubIds.has(item.st.stationId)) {
+          kept.push(item);
+        }
+      }
+      map.set(key, kept);
     }
   };
 
-  const pushMaxN = (map: Map<string, ExtremumEntry[]>, key: string, entry: ExtremumEntry, limit = 3) => {
+  const pushMaxN = (map: Map<string, ExtremumEntry[]>, key: string, entry: ExtremumEntry, limit = 15) => {
     let arr = map.get(key);
     if (!arr) {
       map.set(key, [entry]);
@@ -980,7 +984,15 @@ export function calculateAllToAllArbitrage(
     }
     arr.push(entry);
     arr.sort((a, b) => b.price - a.price);
-    if (arr.length > limit) arr.length = limit;
+    if (arr.length > limit) {
+      const kept: ExtremumEntry[] = [];
+      for (const item of arr) {
+        if (kept.length < limit || majorHubIds.has(item.st.stationId)) {
+          kept.push(item);
+        }
+      }
+      map.set(key, kept);
+    }
   };
 
   for (const st of stations) {
@@ -990,14 +1002,14 @@ export function calculateAllToAllArbitrage(
       if (buyMethod === 'instant') {
         const origPrice = getEffectiveTopLevel(entry.s, 'sell', skipBait);
         if (origPrice !== null && origPrice > 0) {
-          pushMin2(bestOrigins, typeIdStr, { st, price: origPrice });
+          pushMinN(bestOrigins, typeIdStr, { st, price: origPrice }, 4);
         }
       } else {
         const origPrice = getEffectiveTopLevel(entry.b, 'buy', skipBait);
         if (origPrice !== null && origPrice > 0) {
           const sellFloor = entry.s.length > 0 ? entry.s[0][0] * 0.05 : 0;
           if (origPrice >= sellFloor) {
-            pushMin2(bestOrigins, typeIdStr, { st, price: origPrice });
+            pushMinN(bestOrigins, typeIdStr, { st, price: origPrice }, 4);
           }
         }
       }
@@ -1005,7 +1017,7 @@ export function calculateAllToAllArbitrage(
       if (params.tradeMode === 'instant') {
         const destPrice = getEffectiveTopLevel(entry.b, 'buy', skipBait);
         if (destPrice !== null && destPrice > 0) {
-          pushMaxN(bestDests, typeIdStr, { st, price: destPrice }, 3);
+          pushMaxN(bestDests, typeIdStr, { st, price: destPrice }, 15);
         }
       } else {
         const rawSell = entry.s.length > 0 ? entry.s[0][0] : null;
@@ -1015,7 +1027,7 @@ export function calculateAllToAllArbitrage(
             ? Math.min(rawSell, histSell)
             : rawSell;
         if (destPrice !== null && destPrice > 0) {
-          pushMaxN(bestDests, typeIdStr, { st, price: destPrice }, 3);
+          pushMaxN(bestDests, typeIdStr, { st, price: destPrice }, 15);
         }
       }
     }
@@ -1050,10 +1062,11 @@ export function calculateAllToAllArbitrage(
     if (pairs.length === 0) continue;
     pairs.sort((a, b) => b.spread - a.spread);
 
-    const maxToEval = tripCandidatesOut ? Math.min(3, pairs.length) : 1;
+    const maxPasses = tripCandidatesOut ? 3 : 1;
     let recordedPrimary = false;
+    let recordedTrips = 0;
 
-    for (let i = 0; i < maxToEval; i++) {
+    for (let i = 0; i < pairs.length; i++) {
       const { orig: chosenOrig, dest: chosenDest } = pairs[i];
       const jumps = getJumpsBetween?.(chosenOrig.st.systemId, chosenDest.st.systemId);
       if (params.jumpFilter !== 'all' && jumps === undefined) continue;
@@ -1095,6 +1108,10 @@ export function calculateAllToAllArbitrage(
         }
         if (tripCandidatesOut) {
           tripCandidatesOut.push(list[0]);
+          recordedTrips++;
+          if (recordedTrips >= maxPasses) break;
+        } else {
+          break;
         }
       }
     }
