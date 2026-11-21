@@ -836,7 +836,7 @@ export function App() {
     let cancelled = false;
     setTrendingLoading(true);
     setTrendingError(null);
-    fetch('/data/market-trending.json')
+    fetch('./data/market-trending.json')
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json() as Promise<TrendingDataset>;
@@ -863,7 +863,7 @@ export function App() {
     let cancelled = false;
     setLpLoading(true);
     setLpError(null);
-    fetch('/data/fw-lp-offers.json')
+    fetch('./data/fw-lp-offers.json')
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status} loading fw-lp-offers.json`);
         return res.json() as Promise<FwLpDataset>;
