@@ -4,6 +4,7 @@ import {
   ArrowLeftRight,
   ArrowUpDown,
   Award,
+  Bookmark,
   Check,
   ChevronDown,
   ChevronRight,
@@ -14,7 +15,6 @@ import {
   Flame,
   Loader2,
   Package,
-  RefreshCw,
   Route as RouteIcon,
   Search,
   ShieldCheck,
@@ -44,6 +44,7 @@ import { ItemImage } from './components/ItemImage';
 import { OrderBookGrid } from './components/OrderBookGrid';
 import { ALL_HUBS_OPTION, StationSelector } from './components/StationSelector';
 import { LpStorePanel } from './components/LpStorePanel';
+import { MyPlansModal } from './components/MyPlansModal';
 import { TrendingMarketsPanel } from './components/TrendingMarketsPanel';
 import { TripItemModal } from './components/TripItemModal';
 import { TripPlansPanel } from './components/TripPlansPanel';
@@ -52,13 +53,15 @@ import { getTradeTheme } from './utils/theme';
 import {
   calculateAllHubsArbitrage,
   calculateAllOriginHubsArbitrage,
-  calculateAllToAllArbitrage,
+  calculateAllToAllArbitrageProgressive,
   calculateArbitrage,
   formatISK,
   formatInt,
+  formatStationForCopy,
   formatVolume,
 } from './utils/arbitrage';
 import {
+  fetchLiveBooksForPlanItems,
   fetchRouteBetweenSystems,
   fetchSystemActivityMap,
   fetchTopFwStations,
@@ -72,6 +75,12 @@ import {
   type TripItemPick,
   type TripPlan,
 } from './utils/tripPlanner';
+import {
+  createSavedPlanFromTripPlan,
+  loadSavedPlans,
+  persistSavedPlans,
+  type SavedTripPlan,
+} from './utils/savedPlans';
 
 type SortKey =
   | 'tradeScore'
@@ -126,12 +135,12 @@ export function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [copiedStationKey, setCopiedStationKey] = useState<string | null>(null);
-  const [copiedPlanId, setCopiedPlanId] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(50);
 
   // Auto-Fill Ship (5 Trip Plans)
   const [maxStops, setMaxStops] = useState<number>(4);
   const [showTripPlans, setShowTripPlans] = useState<boolean>(true);
+  const [tripVerifying, setTripVerifying] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'arbitrage' | 'trending' | 'lp'>('arbitrage');
   const [trendingData, setTrendingData] = useState<TrendingDataset | null>(null);
   const [trendingLoading, setTrendingLoading] = useState(false);
@@ -139,6 +148,11 @@ export function App() {
   const [lpData, setLpData] = useState<FwLpDataset | null>(null);
   const [lpLoading, setLpLoading] = useState(false);
   const [lpError, setLpError] = useState<string | null>(null);
+  const [allToAllResults, setAllToAllResults] = useState<ArbitrageOpportunity[]>([]);
+  const [allToAllProgress, setAllToAllProgress] = useState<{ done: number; total: number } | null>(null);
+  const [savedPlans, setSavedPlans] = useState<SavedTripPlan[]>(() => loadSavedPlans());
+  const [showMyPlans, setShowMyPlans] = useState(false);
+  const [justSavedPlanId, setJustSavedPlanId] = useState<string | null>(null);
   const [tripPopupItem, setTripPopupItem] = useState<TripItemPick | null>(null);
   const [tripHistoryStats, setTripHistoryStats] = useState<DailyVolumeStats | null>(null);
   const [tripOriginHistoryStats, setTripOriginHistoryStats] = useState<DailyVolumeStats | null>(null);
@@ -147,7 +161,6 @@ export function App() {
   const [liveAutoRefresh, setLiveAutoRefresh] = useState<boolean>(true);
   const [liveSyncing, setLiveSyncing] = useState<boolean>(false);
   const [lastLiveSyncAt, setLastLiveSyncAt] = useState<number | null>(null);
-  const [liveSyncTick, setLiveSyncTick] = useState<number>(0);
 
   const loadData = async () => {
     setLoading(true);
@@ -195,6 +208,53 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Poll market-hubs.json every 5m (and on tab focus) to pick up new 30m snapshots seamlessly
+  useEffect(() => {
+    if (!dataset) return;
+    let cancelled = false;
+    const currentUpdatedAtMs = new Date(dataset.updatedAt).getTime();
+
+    const checkSnapshotUpdate = async () => {
+      if (cancelled || document.hidden) return;
+      try {
+        const res = await fetch(`./data/market-hubs.json?t=${Date.now()}`);
+        if (!res.ok) return;
+        const mktJson: MarketDataset = await res.json();
+        if (cancelled) return;
+        const nextMs = new Date(mktJson.updatedAt).getTime();
+        if (Number.isFinite(nextMs) && nextMs > currentUpdatedAtMs) {
+          setDataset(mktJson);
+          if (mktJson.fwStations) setFwStations(mktJson.fwStations);
+          if (empireData) {
+            fetch(`./data/empire-instant.json?t=${Date.now()}`)
+              .then((r) => (r.ok ? r.json() : null))
+              .then((emp: EmpireInstantDataset | null) => {
+                if (!cancelled && emp) setEmpireData(emp);
+              })
+              .catch(() => {});
+          }
+        }
+      } catch {
+        // Ignore transient fetch errors during background polling
+      }
+    };
+
+    const interval = setInterval(() => {
+      void checkSnapshotUpdate();
+    }, 5 * 60 * 1000);
+
+    const onVisibility = () => {
+      if (!document.hidden) void checkSnapshotUpdate();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [dataset, empireData]);
+
   // Load Origin Station Book
   useEffect(() => {
     if (!dataset || !originStation) return;
@@ -223,7 +283,7 @@ export function App() {
           setOriginProgress(null);
         }
       });
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [dataset, originStation]);
@@ -256,7 +316,7 @@ export function App() {
           setDestProgress(null);
         }
       });
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [dataset, destStation]);
@@ -292,11 +352,11 @@ export function App() {
       }
     };
 
-    // If snapshot is already older than 5m (or manual trigger), sync immediately in background
+    // If snapshot is already older than 5m, sync immediately in background
     const snapshotAgeMs = dataset.updatedAt
       ? Date.now() - new Date(dataset.updatedAt).getTime()
       : Infinity;
-    if (!document.hidden && (snapshotAgeMs > SYNC_INTERVAL_MS || liveSyncTick > 0)) {
+    if (!document.hidden && snapshotAgeMs > SYNC_INTERVAL_MS) {
       void runLiveSync();
     }
 
@@ -313,12 +373,12 @@ export function App() {
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    return () => {
+  return () => {
       cancelled = true;
       clearInterval(timer);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [liveAutoRefresh, dataset, originStation, destStation, liveSyncTick]);
+  }, [liveAutoRefresh, dataset, originStation, destStation]);
 
   // Load Route Jumps
   useEffect(() => {
@@ -346,7 +406,7 @@ export function App() {
       .catch(() => {
         if (!cancelled) setRouteInfo(null);
       });
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [dataset, originStation, destStation]);
@@ -354,11 +414,15 @@ export function App() {
   // Smoothly scroll expanded item dropdown to the center of the viewport
   useEffect(() => {
     if (!expandedId) return;
-    const timer = setTimeout(() => {
+    const raf = requestAnimationFrame(() => {
       const el = document.getElementById(`expanded-${expandedId}`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 50);
-    return () => clearTimeout(timer);
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > window.innerHeight || rect.top < 72) {
+        el.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+      }
+    });
+  return () => cancelAnimationFrame(raf);
   }, [expandedId]);
 
   const isOriginAll = originStation?.stationId === -1;
@@ -423,10 +487,76 @@ export function App() {
       .finally(() => {
         if (!cancelled) setEmpireLoading(false);
       });
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [tradeMode, isOriginAll, isDestAll, empireData]);
+
+  // Progressive full-scan for All -> All mode (collects all profitable pairs without freezing UI)
+  useEffect(() => {
+    if (!dataset || !isBothAll) {
+      setAllToAllResults([]);
+      setAllToAllProgress(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    const activeJumpFilter = tradeMode === 'instant' ? jumpFilter : 'all';
+    const getJumpsBetween = universe
+      ? (fromSys: number, toSys: number) =>
+          getSystemJumpMap(fromSys, universe, routePref)?.get(toSys)
+      : undefined;
+
+    setAllToAllResults([]);
+    setAllToAllProgress({ done: 0, total: 1 });
+
+    calculateAllToAllArbitrageProgressive(
+      dataset,
+      {
+        buyMethod,
+        tradeMode,
+        maxBudget,
+        maxCargo,
+        salesTaxPct,
+        brokerFeePct,
+        minRoiPct,
+        minProfit,
+        liquidityTier,
+        jumpFilter: activeJumpFilter,
+        skipBaitOrders,
+        searchQuery: '',
+      },
+      empireData,
+      getJumpsBetween,
+      (partial, done, total) => {
+        if (controller.signal.aborted) return;
+        setAllToAllResults(partial);
+        setAllToAllProgress(done < total ? { done, total } : null);
+      },
+      controller.signal
+    );
+
+  return () => {
+      controller.abort();
+    };
+  }, [
+    dataset,
+    empireData,
+    isBothAll,
+    buyMethod,
+    tradeMode,
+    maxBudget,
+    maxCargo,
+    salesTaxPct,
+    brokerFeePct,
+    minRoiPct,
+    minProfit,
+    liquidityTier,
+    jumpFilter,
+    routePref,
+    skipBaitOrders,
+    universe,
+  ]);
 
   const rawScan = useMemo(() => {
     if (!dataset || !originStation || !destStation) {
@@ -451,30 +581,10 @@ export function App() {
     const tripCandidates: ArbitrageOpportunity[] = [];
 
     if (isBothAll) {
-      const getJumpsBetween = universe
-        ? (fromSys: number, toSys: number) =>
-            getSystemJumpMap(fromSys, universe, routePref)?.get(toSys)
-        : undefined;
-      list = calculateAllToAllArbitrage(
-        dataset,
-        {
-          buyMethod,
-          tradeMode,
-          maxBudget,
-          maxCargo,
-          salesTaxPct,
-          brokerFeePct,
-          minRoiPct,
-          minProfit,
-          liquidityTier,
-          jumpFilter: activeJumpFilter,
-          skipBaitOrders,
-          searchQuery: '',
-        },
-        empireData,
-        getJumpsBetween,
-        tripCandidates
-      );
+      return {
+        list: allToAllResults,
+        tripCandidates: allToAllResults,
+      };
     } else if (isDestAll && originBook) {
       list = calculateAllHubsArbitrage(
         dataset,
@@ -581,6 +691,7 @@ export function App() {
     activeJumpMap,
     skipBaitOrders,
     universe,
+    allToAllResults,
     searchQuery.trim().length >= 2 ? searchQuery.trim() : '',
     routeInfo?.secureJumps,
     routeInfo?.shortestJumps,
@@ -652,7 +763,7 @@ export function App() {
         if (!cancelled) setHistoryLoading(false);
       });
 
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [
@@ -700,39 +811,56 @@ export function App() {
 
   const handleCopyStation = (e: React.MouseEvent, key: string, stationName: string) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(stationName);
+    navigator.clipboard.writeText(formatStationForCopy(stationName));
     setCopiedStationKey(key);
     setTimeout(() => setCopiedStationKey((prev) => (prev === key ? null : prev)), 1500);
   };
 
-  const handleCopyPlan = (plan: TripPlan) => {
-    const lines: string[] = [
-      `[${plan.title}] (${buyMethod === 'order' ? 'BUY ORDER' : 'INSTANT BUY'} -> ${tradeMode === 'instant' ? 'INSTANT SELL' : 'SELL ORDER'} | ${routePref.toUpperCase()})`,
-      `Route: ${originStation?.stationName ?? '?'} -> ${destStation?.stationName ?? '?'}`,
-      `Net Profit: +${formatISK(plan.totalProfit, true)} ISK | Cost: ${formatISK(plan.totalCost, true)} ISK | Jumps: ${plan.totalJumps}j (${formatISK(plan.iskPerJump, true)}/j)`,
-      `Cargo: ${plan.cargoFillPct !== null ? `${plan.cargoFillPct.toFixed(0)}%` : '∞'} (${formatVolume(plan.totalVolume)}) | Budget: ${plan.budgetUsedPct !== null ? `${plan.budgetUsedPct.toFixed(0)}%` : '∞'} | Avg Score: ${plan.avgScore}`,
-      `Route Kills (1h): ${plan.routeShipKills1h} ships${plan.hottestSystem ? ` (Hot: ${plan.hottestSystem.name} ${plan.hottestSystem.kills})` : ''}`,
-      '--- Stops ---',
-    ];
-    for (const stop of plan.stops) {
-      const secStr = stop.security !== null ? `sec ${stop.security.toFixed(1)}` : 'sec ?';
-      lines.push(`* (${stop.jumpsFromPrev}j) [${secStr}] ${stop.stationName} | Stop Profit: +${formatISK(stop.stopProfit, true)} ISK`);
-      for (const it of stop.items) {
-        lines.push(
-          `  - ${formatInt(it.qty)}x ${it.name} (ID:${it.typeId}) | Buy: ${formatISK(it.buyPrice)} | Sell: ${formatISK(it.sellPrice)} | Profit: +${formatISK(it.totalProfit, true)} | ROI: +${it.roiPct.toFixed(1)}% | Score: ${it.tradeScore}`
-        );
-      }
-    }
-    if (plan.finalDestName) {
-      lines.push(`-> Final Dest (+${plan.jumpsToFinalDest}j): ${plan.finalDestName}`);
-    }
-    navigator.clipboard.writeText(lines.join('\n'));
-    setCopiedPlanId(plan.id);
-    setTimeout(() => setCopiedPlanId((prev) => (prev === plan.id ? null : prev)), 1500);
+  const handleSavePlan = (plan: TripPlan) => {
+    const saved = createSavedPlanFromTripPlan(plan, {
+      buyMethod,
+      tradeMode,
+      salesTaxPct,
+      brokerFeePct,
+      maxBudget,
+      maxCargo,
+      routePref,
+      originStation,
+      destStation,
+    });
+    setSavedPlans((prev) => {
+      const next = [saved, ...prev];
+      persistSavedPlans(next);
+      return next;
+    });
+    setJustSavedPlanId(plan.id);
+    setTimeout(() => setJustSavedPlanId((prev) => (prev === plan.id ? null : prev)), 1600);
+  };
+
+  const handleDeleteSavedPlan = (uid: string) => {
+    setSavedPlans((prev) => {
+      const next = prev.filter((p) => p.uid !== uid);
+      persistSavedPlans(next);
+      return next;
+    });
+  };
+
+  const handleUpdateSavedPlan = (updated: SavedTripPlan) => {
+    setSavedPlans((prev) => {
+      const next = prev.map((p) => (p.uid === updated.uid ? updated : p));
+      persistSavedPlans(next);
+      return next;
+    });
+  };
+
+  const handleClearSavedPlans = () => {
+    setSavedPlans([]);
+    persistSavedPlans([]);
   };
 
   const tripPlans = useMemo<TripPlan[] | null>(() => {
     if (!showTripPlans) return null;
+    if (isBothAll && allToAllProgress) return null;
     return generateTripPlans({
       opportunities: rawScan.tripCandidates,
       originStation,
@@ -749,6 +877,8 @@ export function App() {
     });
   }, [
     showTripPlans,
+    isBothAll,
+    allToAllProgress,
     rawScan.tripCandidates,
     originStation,
     destStation,
@@ -763,8 +893,95 @@ export function App() {
     minProfit,
   ]);
 
-  const handleGenerateTripPlans = () => {
+  const handleGenerateTripPlans = async () => {
     setShowTripPlans(true);
+    if (!dataset || tripVerifying) return;
+
+    const resolveStationRegion = (stationId?: number, fallbackReg?: number): number => {
+      if (fallbackReg && fallbackReg > 0) return fallbackReg;
+      if (!stationId || stationId <= 0) return 0;
+      const fromTop =
+        dataset.topStations.find((s) => s.stationId === stationId) ??
+        dataset.fwStations?.find((s) => s.stationId === stationId) ??
+        empireData?.stations[String(stationId)];
+      return fromTop?.regionId ?? 0;
+    };
+
+    const queries: { regionId: number; typeId: number; stationIds: number[] }[] = [];
+    const seenPairs = new Set<string>();
+    const addCandidate = (opp: ArbitrageOpportunity) => {
+      if (seenPairs.size >= 25) return;
+      const oSid = opp.originStationId ?? (originStation?.stationId && originStation.stationId > 0 ? originStation.stationId : 0);
+      const dSid = opp.destStationId ?? (destStation?.stationId && destStation.stationId > 0 ? destStation.stationId : 0);
+      const oReg = resolveStationRegion(oSid, opp.originRegionId ?? originStation?.regionId);
+      const dReg = resolveStationRegion(dSid, opp.destRegionId ?? destStation?.regionId);
+      if (oReg > 0 && oSid > 0) {
+        const k = `${oReg}:${opp.typeId}`;
+        seenPairs.add(k);
+        queries.push({ regionId: oReg, typeId: opp.typeId, stationIds: [oSid] });
+      }
+      if (dReg > 0 && dSid > 0) {
+        const k = `${dReg}:${opp.typeId}`;
+        seenPairs.add(k);
+        queries.push({ regionId: dReg, typeId: opp.typeId, stationIds: [dSid] });
+      }
+    };
+
+    if (tripPlans) {
+      for (const p of tripPlans) {
+        for (const s of p.stops) {
+          for (const it of s.items) addCandidate(it.opp);
+        }
+      }
+    }
+    for (const opp of rawScan.tripCandidates.slice(0, 25)) {
+      addCandidate(opp);
+    }
+
+    if (queries.length === 0) return;
+
+    setTripVerifying(true);
+    try {
+      const updates = await fetchLiveBooksForPlanItems(queries);
+      if (Object.keys(updates).length === 0) return;
+
+      if (originStation && originStation.stationId > 0 && updates[originStation.stationId]) {
+        const patch = updates[originStation.stationId];
+        setOriginBook((prev) => (prev ? { ...prev, ...patch } : prev));
+      }
+      if (destStation && destStation.stationId > 0 && updates[destStation.stationId]) {
+        const patch = updates[destStation.stationId];
+        setDestBook((prev) => (prev ? { ...prev, ...patch } : prev));
+      }
+
+      setDataset((prev) => {
+        if (!prev) return prev;
+        let changed = false;
+        const nextOrders = { ...prev.orders };
+        for (const [sidStr, patch] of Object.entries(updates)) {
+          if (nextOrders[sidStr]) {
+            nextOrders[sidStr] = { ...nextOrders[sidStr], ...patch };
+            changed = true;
+          }
+        }
+        return changed ? { ...prev, orders: nextOrders } : prev;
+      });
+
+      setEmpireData((prev) => {
+        if (!prev) return prev;
+        let changed = false;
+        const nextOrders = { ...prev.orders };
+        for (const [sidStr, patch] of Object.entries(updates)) {
+          if (nextOrders[sidStr]) {
+            nextOrders[sidStr] = { ...nextOrders[sidStr], ...patch };
+            changed = true;
+          }
+        }
+        return changed ? { ...prev, orders: nextOrders } : prev;
+      });
+    } finally {
+      setTripVerifying(false);
+    }
   };
 
   // Load Origin & Dest 30-day History when a Trip Plan item popup is opened
@@ -806,7 +1023,7 @@ export function App() {
         if (!cancelled) setTripHistoryLoading(false);
       });
 
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [
@@ -822,7 +1039,7 @@ export function App() {
       if (e.key === 'Escape') setTripPopupItem(null);
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+  return () => window.removeEventListener('keydown', onKeyDown);
   }, [tripPopupItem]);
 
   // Close stale item popup when route or mode changes (keep trip plans auto-updating)
@@ -852,7 +1069,7 @@ export function App() {
       .finally(() => {
         if (!cancelled) setTrendingLoading(false);
       });
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [activeTab, trendingData]);
@@ -879,7 +1096,7 @@ export function App() {
       .finally(() => {
         if (!cancelled) setLpLoading(false);
       });
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [activeTab, lpData]);
@@ -902,6 +1119,17 @@ export function App() {
 
   const isFetchingRegion = Boolean(originProgress || destProgress);
   const theme = getTradeTheme(buyMethod, tradeMode, activeTab);
+
+  const sessionBooks = useMemo(() => {
+    const map: Record<number, Record<string, HubBook>> = {};
+    if (originStation && originStation.stationId > 0 && originBook) {
+      map[originStation.stationId] = originBook;
+    }
+    if (destStation && destStation.stationId > 0 && destBook) {
+      map[destStation.stationId] = destBook;
+    }
+    return map;
+  }, [originStation, originBook, destStation, destBook]);
 
   return (
     <div className={`min-h-screen ${theme.pageBg} text-slate-200 flex flex-col transition-colors duration-300`}>
@@ -964,6 +1192,27 @@ export function App() {
             </button>
           </nav>
 
+          {/* Separate Group: Floating My Plan Modal Trigger */}
+          <div className="flex items-center bg-slate-900/80 border border-slate-800 rounded-lg p-1">
+            <button
+              type="button"
+              onClick={() => setShowMyPlans(true)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
+                showMyPlans
+                  ? theme.pillActive
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Bookmark className="w-3.5 h-3.5 text-cyan-400" />
+              <span>My Plan</span>
+              {savedPlans.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-[10px] tabular-nums">
+                  {savedPlans.length}
+                </span>
+              )}
+            </button>
+          </div>
+
           <div className="flex items-center gap-2 sm:gap-3">
             <button
               type="button"
@@ -1009,17 +1258,6 @@ export function App() {
                 <span>Hubs {updatedLabel}</span>
               </div>
             )}
-            <button
-              onClick={() => {
-                void loadData();
-                if (liveAutoRefresh) setLiveSyncTick((t) => t + 1);
-              }}
-              disabled={loading || liveSyncing}
-              className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition cursor-pointer disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading || liveSyncing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Reload</span>
-            </button>
           </div>
         </div>
       </header>
@@ -1675,6 +1913,14 @@ export function App() {
             </div>
 
             <div className="flex items-center gap-4 text-xs tabular-nums">
+              {isBothAll && allToAllProgress && (
+                <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>
+                    Scanning {Math.round((allToAllProgress.done / Math.max(1, allToAllProgress.total)) * 100)}%
+                  </span>
+                </div>
+              )}
               <div>
                 <span className="text-slate-400">Found: </span>
                 <span className="font-bold text-white">
@@ -1700,14 +1946,19 @@ export function App() {
             theme={theme}
             tripPlans={tripPlans}
             maxStops={maxStops}
-            disabled={loading || isFetchingRegion || opportunities.length === 0}
-            copiedPlanId={copiedPlanId}
+            disabled={loading || isFetchingRegion || Boolean(allToAllProgress) || opportunities.length === 0}
+            verifying={tripVerifying || loading || isFetchingRegion || Boolean(allToAllProgress)}
+            justSavedPlanId={justSavedPlanId}
             copiedStationKey={copiedStationKey}
             copiedId={copiedId}
+            isDestAll={isDestAll}
+            originStationName={
+              originStation && originStation.stationId !== -1 ? originStation.stationName : null
+            }
             onGenerate={handleGenerateTripPlans}
             onHide={() => setShowTripPlans(false)}
             onSetMaxStops={setMaxStops}
-            onCopyPlan={handleCopyPlan}
+            onSavePlan={handleSavePlan}
             onCopyStation={handleCopyStation}
             onCopyName={handleCopyName}
             onSelectItem={setTripPopupItem}
@@ -1799,7 +2050,7 @@ export function App() {
                   visibleRows.map((row) => {
                     const rowKey = getRowKey(row);
                     const isExpanded = expandedId === rowKey;
-                    return (
+  return (
                       <Fragment key={rowKey}>
                         <tr
                           onClick={() => handleToggleRow(row)}
@@ -2220,6 +2471,24 @@ export function App() {
           onClose={() => setTripPopupItem(null)}
         />
       )}
+
+      {/* Floating My Saved Plans Modal */}
+      <MyPlansModal
+        open={showMyPlans}
+        plans={savedPlans}
+        dataset={dataset}
+        empireData={empireData}
+        universe={universe}
+        activityMap={activityMap}
+        routePref={routePref}
+        maxBudget={maxBudget}
+        maxCargo={maxCargo}
+        sessionBooks={sessionBooks}
+        onClose={() => setShowMyPlans(false)}
+        onDeletePlan={handleDeleteSavedPlan}
+        onUpdatePlan={handleUpdateSavedPlan}
+        onClearAll={handleClearSavedPlans}
+      />
     </div>
   );
 }

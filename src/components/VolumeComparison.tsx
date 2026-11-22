@@ -104,24 +104,22 @@ function VolumeCard({
               </div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500">Last Trade</div>
+              <div className="text-[10px] text-slate-500">Avg Price (1d)</div>
               <div
-                title={stats.lastTradeDate ?? undefined}
+                title={
+                  stats.lastAvgPrice
+                    ? `${formatISK(stats.lastAvgPrice)} ISK${stats.lastTradeDate ? ` (${stats.lastTradeDate})` : ''}`
+                    : undefined
+                }
                 className={`font-bold ${
-                  stats.daysSinceLastTrade === null
-                    ? 'text-slate-500'
-                    : stats.daysSinceLastTrade <= 1
-                    ? 'text-emerald-400'
-                    : stats.daysSinceLastTrade <= 3
+                  stats.lastAvgPrice !== null && stats.lastAvgPrice > 0
                     ? 'text-amber-300'
-                    : 'text-rose-400'
+                    : 'text-slate-500'
                 }`}
               >
-                {stats.daysSinceLastTrade === null
-                  ? 'None'
-                  : stats.daysSinceLastTrade === 0
-                  ? 'Today'
-                  : `${stats.daysSinceLastTrade}d ago`}
+                {stats.lastAvgPrice !== null && stats.lastAvgPrice > 0
+                  ? formatISK(stats.lastAvgPrice, true)
+                  : '—'}
               </div>
             </div>
           </div>

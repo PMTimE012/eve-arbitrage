@@ -8,6 +8,11 @@ import type {
 } from '../types';
 import type { RoutePreference } from './routing';
 
+/** Strip parenthetical planet/status tags like `(Oris)` or `(Damaged)` when copying station names. */
+export function formatStationForCopy(stationName: string): string {
+  return stationName.replace(/\s*\([^)]*\)/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+
 function computeTrendBonus(trendPct: number | null): number {
   if (trendPct === null || Math.abs(trendPct) <= 10) return 0;
   if (trendPct > 10) {
@@ -1117,6 +1122,244 @@ export function calculateAllToAllArbitrage(
     }
   }
 
+  return results;
+}
+
+export async function calculateAllToAllArbitrageProgressive(
+  dataset: MarketDataset,
+  params: Omit<ArbitrageParams, 'originBook' | 'destBook'>,
+  empireData: EmpireInstantDataset | null | undefined,
+  getJumpsBetween: ((fromSystemId: number, toSystemId: number) => number | undefined) | undefined,
+  onProgress: (partial: ArbitrageOpportunity[], done: number, total: number) => void,
+  signal: AbortSignal
+): Promise<ArbitrageOpportunity[]> {
+  const buyMethod = params.buyMethod ?? 'instant';
+  const skipBait = params.skipBaitOrders ?? true;
+  const taxMultiplier =
+    1 - (params.salesTaxPct + (params.tradeMode === 'patient' ? params.brokerFeePct : 0)) / 100;
+
+  interface StationWithBook {
+    stationId: number;
+    stationName: string;
+    systemId: number;
+    systemName: string;
+    regionId: number;
+    regionName: string;
+    book: Record<string, HubBook>;
+  }
+
+  interface ExtremumEntry {
+    st: StationWithBook;
+    price: number;
+  }
+
+  const stations: StationWithBook[] = [];
+  for (const st of getPreloadedStations(dataset)) {
+    const book = dataset.orders[String(st.stationId)];
+    if (book) stations.push({ ...st, book });
+  }
+  if (params.tradeMode === 'instant' && empireData) {
+    for (const [stIdStr, book] of Object.entries(empireData.orders)) {
+      const st = empireData.stations[stIdStr];
+      if (st) stations.push({ ...st, book });
+    }
+  }
+
+  const originsByType = new Map<string, ExtremumEntry[]>();
+  const destsByType = new Map<string, ExtremumEntry[]>();
+
+  for (const st of stations) {
+    if (signal.aborted) return [];
+    for (const [typeIdStr, entry] of Object.entries(st.book)) {
+      if (!dataset.items[typeIdStr]) continue;
+
+      if (buyMethod === 'instant') {
+        const origPrice = getEffectiveTopLevel(entry.s, 'sell', skipBait);
+        if (origPrice !== null && origPrice > 0) {
+          let arr = originsByType.get(typeIdStr);
+          if (!arr) {
+            arr = [];
+            originsByType.set(typeIdStr, arr);
+          }
+          arr.push({ st, price: origPrice });
+        }
+      } else {
+        const origPrice = getEffectiveTopLevel(entry.b, 'buy', skipBait);
+        if (origPrice !== null && origPrice > 0) {
+          const sellFloor = entry.s.length > 0 ? entry.s[0][0] * 0.05 : 0;
+          if (origPrice >= sellFloor) {
+            let arr = originsByType.get(typeIdStr);
+            if (!arr) {
+              arr = [];
+              originsByType.set(typeIdStr, arr);
+            }
+            arr.push({ st, price: origPrice });
+          }
+        }
+      }
+
+      if (params.tradeMode === 'instant') {
+        const destPrice = getEffectiveTopLevel(entry.b, 'buy', skipBait);
+        if (destPrice !== null && destPrice > 0) {
+          let arr = destsByType.get(typeIdStr);
+          if (!arr) {
+            arr = [];
+            destsByType.set(typeIdStr, arr);
+          }
+          arr.push({ st, price: destPrice });
+        }
+      } else {
+        const rawSell = entry.s.length > 0 ? entry.s[0][0] : null;
+        const histSell = dataset.historySellPrice7d?.[String(st.regionId)]?.[typeIdStr];
+        const destPrice =
+          rawSell !== null && histSell && histSell > 0 ? Math.min(rawSell, histSell) : rawSell;
+        if (destPrice !== null && destPrice > 0) {
+          let arr = destsByType.get(typeIdStr);
+          if (!arr) {
+            arr = [];
+            destsByType.set(typeIdStr, arr);
+          }
+          arr.push({ st, price: destPrice });
+        }
+      }
+    }
+  }
+
+  const candidateList: { typeIdStr: string; bestSpread: number }[] = [];
+  for (const [typeIdStr, origList] of originsByType.entries()) {
+    const destList = destsByType.get(typeIdStr);
+    if (!destList || destList.length === 0) continue;
+    origList.sort((a, b) => a.price - b.price);
+    destList.sort((a, b) => b.price - a.price);
+    if (params.maxBudget > 0 && origList[0].price > params.maxBudget) continue;
+    const bestSpread = destList[0].price * taxMultiplier - origList[0].price;
+    if (bestSpread <= 0) continue;
+    if (params.minRoiPct > 0 && (bestSpread / origList[0].price) * 100 < params.minRoiPct) {
+      continue;
+    }
+    candidateList.push({ typeIdStr, bestSpread });
+  }
+  candidateList.sort((a, b) => b.bestSpread - a.bestSpread);
+
+  const priorityDestIds = new Set<number>([
+    ...dataset.hubs.map((h) => h.stationId),
+    ...dataset.topStations.slice(0, 10).map((s) => s.stationId),
+    ...(dataset.fwStations ?? []).slice(0, 10).map((s) => s.stationId),
+  ]);
+  const results: ArbitrageOpportunity[] = [];
+  const total = candidateList.length;
+  let sliceStart = performance.now();
+  let lastEmit = sliceStart;
+  const MAX_ROUTES_PER_ITEM = 12;
+
+  const maybeEmitProgress = (done: number) => {
+    const now = performance.now();
+    const interval = results.length >= 1000 ? 750 : 250;
+    if (now - lastEmit > interval) {
+      onProgress([...results], done, total);
+      lastEmit = now;
+    }
+  };
+
+  for (let idx = 0; idx < total; idx++) {
+    if (signal.aborted) return [];
+    const typeIdStr = candidateList[idx].typeIdStr;
+    const origList = originsByType.get(typeIdStr)!;
+    const destList = destsByType.get(typeIdStr)!;
+    const minOrigPrice = origList[0].price;
+    const unitVol = dataset.items[typeIdStr]?.v ?? 0;
+    let itemMatchCount = 0;
+
+    for (let dIdx = 0; dIdx < destList.length; dIdx++) {
+      const chosenDest = destList[dIdx];
+      const isPriorityDest = priorityDestIds.has(chosenDest.st.stationId);
+      if (itemMatchCount >= MAX_ROUTES_PER_ITEM && !isPriorityDest) continue;
+      const maxNetRev = chosenDest.price * taxMultiplier;
+      if (maxNetRev <= minOrigPrice) break;
+      if (params.minRoiPct > 0 && ((maxNetRev - minOrigPrice) / minOrigPrice) * 100 < params.minRoiPct) {
+        break;
+      }
+
+      let destOrigMatches = 0;
+      for (let oIdx = 0; oIdx < origList.length; oIdx++) {
+        const chosenOrig = origList[oIdx];
+        if (params.maxBudget > 0 && chosenOrig.price > params.maxBudget) break;
+        const unitSpread = maxNetRev - chosenOrig.price;
+        if (unitSpread <= 0) break;
+        if (params.minRoiPct > 0 && (unitSpread / chosenOrig.price) * 100 < params.minRoiPct) {
+          break;
+        }
+        if (chosenOrig.st.stationId === chosenDest.st.stationId) continue;
+
+        if (params.minProfit > 0) {
+          const budgetQty =
+            params.maxBudget > 0 ? Math.floor(params.maxBudget / chosenOrig.price) : Infinity;
+          const cargoQty =
+            params.maxCargo > 0 && unitVol > 0 ? Math.floor(params.maxCargo / unitVol) : Infinity;
+          const maxQty = Math.min(budgetQty, cargoQty);
+          if (Number.isFinite(maxQty) && maxQty * unitSpread < params.minProfit) continue;
+        }
+
+        const jumps = getJumpsBetween?.(chosenOrig.st.systemId, chosenDest.st.systemId);
+        if (params.jumpFilter !== 'all' && jumps === undefined) continue;
+        if (!passesJumpFilter(jumps, params.jumpFilter)) continue;
+
+        const list = calculateArbitrage(
+          dataset,
+          {
+            ...params,
+            originBook: { [typeIdStr]: chosenOrig.st.book[typeIdStr] },
+            destBook: { [typeIdStr]: chosenDest.st.book[typeIdStr] },
+            originRegionId: chosenOrig.st.regionId,
+            destRegionId: chosenDest.st.regionId,
+          },
+          {
+            stationId: chosenDest.st.stationId,
+            stationName: chosenDest.st.stationName,
+            systemId: chosenDest.st.systemId,
+            systemName: chosenDest.st.systemName,
+            regionId: chosenDest.st.regionId,
+            regionName: chosenDest.st.regionName,
+            jumps,
+          },
+          {
+            stationId: chosenOrig.st.stationId,
+            stationName: chosenOrig.st.stationName,
+            systemId: chosenOrig.st.systemId,
+            systemName: chosenOrig.st.systemName,
+            regionId: chosenOrig.st.regionId,
+            regionName: chosenOrig.st.regionName,
+            jumps,
+          }
+        );
+
+        if (list.length > 0) {
+          results.push(list[0]);
+          itemMatchCount++;
+          destOrigMatches++;
+          if (destOrigMatches >= 2) break;
+        }
+
+        if (performance.now() - sliceStart > 16) {
+          maybeEmitProgress(idx + 1);
+          await new Promise<void>((r) => setTimeout(r, 0));
+          if (signal.aborted) return [];
+          sliceStart = performance.now();
+        }
+      }
+    }
+
+    if (performance.now() - sliceStart > 16) {
+      maybeEmitProgress(idx + 1);
+      await new Promise<void>((r) => setTimeout(r, 0));
+      if (signal.aborted) return [];
+      sliceStart = performance.now();
+    }
+  }
+
+  if (!signal.aborted) {
+    onProgress([...results], total, total);
+  }
   return results;
 }
 

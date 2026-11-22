@@ -42,8 +42,8 @@ export interface FwStationInfo extends StationOption {
 
 export interface UniverseStationsData {
   regions: Record<string, string>;
-  /** [systemName, regionId, security] */
-  systems: Record<string, [string, number, number]>;
+  /** [systemName, regionId, security, xScaled?, zScaled?] */
+  systems: Record<string, [string, number, number, number?, number?]>;
   /** [stationId, stationName, systemId] */
   stations: [number, string, number][];
   /** Flat undirected stargate pairs [fromSystemId, toSystemId, ...] */

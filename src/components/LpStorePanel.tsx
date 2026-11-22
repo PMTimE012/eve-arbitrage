@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 import type { FwLpDataset, MarketDataset, UniverseStationsData } from '../types';
-import { formatISK, formatInt, formatVolume } from '../utils/arbitrage';
+import { formatISK, formatInt, formatStationForCopy, formatVolume } from '../utils/arbitrage';
 import {
   evaluateLpOffers,
   type LpSellMethod,
@@ -294,7 +294,7 @@ export function LpStorePanel({
 
               <button
                 type="button"
-                onClick={() => copyText(activeLpStation.name, 'station')}
+                onClick={() => copyText(formatStationForCopy(activeLpStation.name), 'station')}
                 title="Copy station name"
                 className="p-1 rounded text-slate-500 hover:text-cyan-300 hover:bg-slate-800 transition cursor-pointer shrink-0"
               >

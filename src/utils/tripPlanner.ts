@@ -12,6 +12,17 @@ import {
   summarizePathKills,
   type RoutePreference,
 } from './routing';
+import { formatISK } from './arbitrage';
+
+function applyPlanLabels(plans: TripPlan[]): void {
+  plans.forEach((plan, idx) => {
+    plan.id = `plan-${idx + 1}`;
+    const cargoPct = plan.cargoFillPct !== null ? `${plan.cargoFillPct.toFixed(0)}%` : '—';
+    const budgetPct = plan.budgetUsedPct !== null ? `${plan.budgetUsedPct.toFixed(0)}%` : '—';
+    plan.title = `${formatISK(plan.iskPerJump, true)}/j - ${cargoPct}/${budgetPct}`;
+    plan.subtitle = `${plan.stops.length} stop${plan.stops.length > 1 ? 's' : ''} • ${plan.totalJumps} jumps`;
+  });
+}
 
 export interface TripItemPick {
   typeId: number;
@@ -386,11 +397,7 @@ export function generateTripPlans(params: {
 
     allPlans.sort((a, b) => b.iskPerJump - a.iskPerJump);
     const top5 = allPlans.slice(0, 5);
-    top5.forEach((plan, idx) => {
-      plan.id = `plan-${idx + 1}`;
-      plan.title = `Plan #${idx + 1} • Best ISK/Jump`;
-      plan.subtitle = idx === 0 ? 'Highest ISK per jump corridor' : `Rank #${idx + 1} ISK per jump corridor`;
-    });
+    applyPlanLabels(top5);
     return top5;
   }
 
@@ -511,10 +518,46 @@ export function generateTripPlans(params: {
       excludedTypeIds
     );
 
-    const activeStations = selectedStations.filter(
+    let activeStations = selectedStations.filter(
       (s) => (pickedMap.get(s.stationId)?.length ?? 0) > 0
     );
     if (activeStations.length === 0) return null;
+
+    let finalPickedMap = pickedMap;
+    if (activeStations.length > 1) {
+      const stopProfits = activeStations.map((st) => ({
+        st,
+        profit: (pickedMap.get(st.stationId) ?? []).reduce((a, x) => a + x.totalProfit, 0),
+      }));
+      const totalPackedProfit = stopProfits.reduce((a, x) => a + x.profit, 0);
+      const minStopShare = totalPackedProfit * 0.05;
+      const worthwhileStations = stopProfits
+        .filter((x) => x.profit >= minStopShare)
+        .map((x) => x.st);
+
+      if (worthwhileStations.length > 0 && worthwhileStations.length < activeStations.length) {
+        const repacked = packItemsForStops(
+          new Set(worthwhileStations.map((s) => s.stationId)),
+          candidates,
+          tradeMode,
+          maxBudget,
+          maxCargo,
+          priorityFn,
+          maxSharePerItem,
+          26,
+          maxDistinctItems,
+          minItemProfit,
+          excludedTypeIds
+        );
+        const repackedActive = worthwhileStations.filter(
+          (s) => (repacked.get(s.stationId)?.length ?? 0) > 0
+        );
+        if (repackedActive.length > 0) {
+          activeStations = repackedActive;
+          finalPickedMap = repacked;
+        }
+      }
+    }
 
     const { ordered, legJumps, endJumps, totalJumps } = getExactOptimalOrder(
       activeStations,
@@ -532,7 +575,7 @@ export function generateTripPlans(params: {
     let itemCount = 0;
 
     const stops: TripStop[] = ordered.map((st, idx) => {
-      const items = pickedMap.get(st.stationId) ?? [];
+      const items = finalPickedMap.get(st.stationId) ?? [];
       const stopCost = items.reduce((a, x) => a + x.totalCost, 0);
       const stopProfit = items.reduce((a, x) => a + x.totalProfit, 0);
       const stopVolume = items.reduce((a, x) => a + x.totalVolume, 0);
@@ -760,11 +803,7 @@ export function generateTripPlans(params: {
 
   // Sort final plans by ISK/Jump (highest first) and label #1..#5
   plans.sort((a, b) => b.iskPerJump - a.iskPerJump);
-  plans.forEach((plan, idx) => {
-    plan.id = `plan-${idx + 1}`;
-    plan.title = `Plan #${idx + 1} • Best ISK/Jump`;
-    plan.subtitle = idx === 0 ? 'Highest ISK per jump corridor' : `Rank #${idx + 1} ISK per jump corridor`;
-  });
+  applyPlanLabels(plans);
 
   return plans;
 }

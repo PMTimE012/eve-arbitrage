@@ -1,4 +1,5 @@
 import { ExternalLink, X } from 'lucide-react';
+import { useEffect } from 'react';
 import type { BuyMethod, StationOption, TradeMode } from '../types';
 import { formatISK, formatInt, formatVolume } from '../utils/arbitrage';
 import type { DailyVolumeStats } from '../utils/history';
@@ -36,13 +37,21 @@ export function TripItemModal({
   const originRegionName = opp.originRegionName ?? originStation?.regionName ?? 'Origin';
   const destRegionName = opp.destRegionName ?? destStation?.regionName ?? 'Destination';
 
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-3 sm:p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-3 sm:p-4 overscroll-contain"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl bg-[#0b1120] border border-slate-700/80 shadow-2xl p-4 space-y-3"
+        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto overscroll-contain rounded-2xl bg-[#0b1120] border border-slate-700/80 shadow-2xl p-4 space-y-3"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

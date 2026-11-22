@@ -179,6 +179,87 @@ export async function loadStationMarketBook(
   return book;
 }
 
+/**
+ * Fetch live ESI order books ONLY for specific (regionId, typeId, stationIds) pairs.
+ * Uses ESI's `type_id` filter (~1 page per item) instead of downloading the entire region (~300+ pages).
+ */
+export async function fetchLiveBooksForPlanItems(
+  queries: { regionId: number; typeId: number; stationIds: number[] }[]
+): Promise<Record<number, Record<string, HubBook>>> {
+  const dedup = new Map<string, { regionId: number; typeId: number; stationIds: Set<number> }>();
+  for (const q of queries) {
+    if (!q.regionId || q.regionId <= 0 || !q.typeId || q.typeId <= 0) continue;
+    const key = `${q.regionId}:${q.typeId}`;
+    let entry = dedup.get(key);
+    if (!entry) {
+      entry = { regionId: q.regionId, typeId: q.typeId, stationIds: new Set<number>() };
+      dedup.set(key, entry);
+    }
+    for (const sid of q.stationIds) {
+      if (sid > 0) entry.stationIds.add(sid);
+    }
+  }
+
+  const tasks = Array.from(dedup.values()).filter((t) => t.stationIds.size > 0);
+  const result: Record<number, Record<string, HubBook>> = {};
+  if (tasks.length === 0) return result;
+
+  let idx = 0;
+  const concurrency = 6;
+  const worker = async () => {
+    while (idx < tasks.length) {
+      const task = tasks[idx++];
+      try {
+        const base = `https://esi.evetech.net/latest/markets/${task.regionId}/orders/?datasource=tranquility&order_type=all&type_id=${task.typeId}&page=`;
+        const first = await fetchJsonWithRetry<EsiOrder[]>(`${base}1`);
+        const totalPages = Math.max(1, Number(first.headers.get('x-pages') ?? '1'));
+        const orders = [...first.data];
+        if (totalPages > 1) {
+          const restPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+          const restResults = await Promise.all(
+            restPages.map((p) => fetchJsonWithRetry<EsiOrder[]>(`${base}${p}`))
+          );
+          for (const r of restResults) orders.push(...r.data);
+        }
+
+        const perStation = new Map<number, { s: [number, number][]; b: [number, number][] }>();
+        for (const sid of task.stationIds) {
+          perStation.set(sid, { s: [], b: [] });
+        }
+
+        for (const o of orders) {
+          const bucket = perStation.get(o.location_id);
+          if (!bucket) continue;
+          if (o.is_buy_order && (o.min_volume ?? 1) > 1) continue;
+          if (o.is_buy_order) {
+            bucket.b.push([o.price, o.volume_remain]);
+          } else {
+            bucket.s.push([o.price, o.volume_remain]);
+          }
+        }
+
+        const typeStr = String(task.typeId);
+        for (const [sid, b] of perStation.entries()) {
+          b.s.sort((a, c) => a[0] - c[0]);
+          b.b.sort((a, c) => c[0] - a[0]);
+          if (!result[sid]) result[sid] = {};
+          result[sid][typeStr] = {
+            s: b.s.slice(0, 5),
+            b: b.b.slice(0, 5),
+            sv: b.s.reduce((acc, x) => acc + x[1], 0),
+            bv: b.b.reduce((acc, x) => acc + x[1], 0),
+          };
+        }
+      } catch {
+        // Skip failed item fetch cleanly so other items still update
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
+  return result;
+}
+
 export function summarizeStationBook(book: Record<string, HubBook> | null): StationVolumeSummary {
   if (!book) {
     return { activeItemTypes: 0, totalSellUnits: 0, totalBuyUnits: 0, totalBuyIskValue: 0 };

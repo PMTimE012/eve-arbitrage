@@ -260,6 +260,10 @@ async function loadSdeData() {
   const sysIdxName = sysHeaders.indexOf('solarSystemName');
   const sysIdxReg = sysHeaders.indexOf('regionID');
   const sysIdxSec = sysHeaders.indexOf('security');
+  const sysIdx2dX = sysHeaders.indexOf('position2Dx');
+  const sysIdx2dY = sysHeaders.indexOf('position2Dy');
+  const sysIdxX = sysHeaders.indexOf('x');
+  const sysIdxZ = sysHeaders.indexOf('z');
   for (let i = 1; i < sysLines.length; i++) {
     if (!sysLines[i]) continue;
     const cols = parseCsvLine(sysLines[i]);
@@ -267,8 +271,12 @@ async function loadSdeData() {
     const name = cols[sysIdxName];
     const regId = Number(cols[sysIdxReg]);
     const sec = Number(Number(cols[sysIdxSec]).toFixed(2));
+    const rawX = sysIdx2dX >= 0 && cols[sysIdx2dX] ? Number(cols[sysIdx2dX]) : Number(cols[sysIdxX]);
+    const rawY = sysIdx2dY >= 0 && cols[sysIdx2dY] ? Number(cols[sysIdx2dY]) : Number(cols[sysIdxZ]);
+    const x = Number.isFinite(rawX) ? Math.round(rawX / 1e12) : 0;
+    const y = Number.isFinite(rawY) ? Math.round(rawY / 1e12) : 0;
     if (id && name && regId) {
-      systems[id] = [name, regId, sec];
+      systems[id] = [name, regId, sec, x, y];
     }
   }
 
