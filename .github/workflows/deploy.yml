@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
   schedule:
-    # Refresh market snapshot every 30 minutes (off-peak prime minutes to avoid :00/:30 queue congestion)
-    - cron: '11,41 * * * *'
+    # Poll every 5 minutes; the freshness check below skips the job unless the deployed
+    # snapshot is >= 30m old. Frequent polling compensates for GitHub dropping/delaying
+    # scheduled runs and retries a failed run within ~5 minutes.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -15,7 +17,8 @@ permissions:
 
 concurrency:
   group: 'pages'
-  cancel-in-progress: true
+  # Never cancel a running deploy (cheap "skip" runs would otherwise kill real ones)
+  cancel-in-progress: false
 
 jobs:
   build-and-deploy:
@@ -24,32 +27,49 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
+      - name: Check deployed snapshot freshness
+        id: fresh
+        if: github.event_name == 'schedule'
+        run: |
+          URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/market-hubs.json?t=$(date +%s)"
+          AGE=$(curl -fsS "$URL" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(Math.round((Date.now()-Date.parse(JSON.parse(s).updatedAt))/60000))})" || echo 9999)
+          echo "Deployed snapshot age: $AGE min"
+          if [ "$AGE" -lt 30 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+
       - name: Checkout
+        if: steps.fresh.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Setup Node.js
+        if: steps.fresh.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
+        if: steps.fresh.outputs.skip != 'true'
         run: npm ci
 
       - name: Fetch 5-Hub EVE Market Data
+        if: steps.fresh.outputs.skip != 'true'
         run: npm run fetch-data
 
       - name: Build static site
+        if: steps.fresh.outputs.skip != 'true'
         run: npm run build
 
       - name: Setup Pages
+        if: steps.fresh.outputs.skip != 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
+        if: steps.fresh.outputs.skip != 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: './dist'
 
       - name: Deploy to GitHub Pages
+        if: steps.fresh.outputs.skip != 'true'
         id: deployment
         uses: actions/deploy-pages@v4

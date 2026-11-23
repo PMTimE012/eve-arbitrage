@@ -15,6 +15,7 @@ import {
   Flame,
   Loader2,
   Package,
+  RefreshCw,
   Route as RouteIcon,
   Search,
   ShieldCheck,
@@ -160,6 +161,7 @@ export function App() {
   const [tripHistoryError, setTripHistoryError] = useState<string | null>(null);
   const [liveAutoRefresh, setLiveAutoRefresh] = useState<boolean>(true);
   const [liveSyncing, setLiveSyncing] = useState<boolean>(false);
+  const [reloading, setReloading] = useState<boolean>(false);
   const [lastLiveSyncAt, setLastLiveSyncAt] = useState<number | null>(null);
 
   const loadData = async () => {
@@ -207,6 +209,30 @@ export function App() {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Manual reload: force-refetch the latest deployed snapshot (hubs, empire, FW) regardless of age
+  const reloadSnapshot = async () => {
+    if (reloading) return;
+    setReloading(true);
+    try {
+      const [mktRes, empRes] = await Promise.all([
+        fetch(`./data/market-hubs.json?t=${Date.now()}`, { cache: 'no-store' }),
+        fetch(`./data/empire-instant.json?t=${Date.now()}`, { cache: 'no-store' }).catch(() => null),
+      ]);
+      if (!mktRes.ok) throw new Error(`HTTP ${mktRes.status}`);
+      const mktJson: MarketDataset = await mktRes.json();
+      setDataset(mktJson);
+      if (mktJson.fwStations) setFwStations(mktJson.fwStations);
+      if (empRes && empRes.ok) {
+        const emp: EmpireInstantDataset = await empRes.json();
+        setEmpireData(emp);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? `Reload failed: ${err.message}` : 'Reload failed');
+    } finally {
+      setReloading(false);
+    }
+  };
 
   // Poll market-hubs.json every 5m (and on tab focus) to pick up new 30m snapshots seamlessly
   useEffect(() => {
@@ -1258,6 +1284,16 @@ export function App() {
                 <span>Hubs {updatedLabel}</span>
               </div>
             )}
+            <button
+              type="button"
+              onClick={() => void reloadSnapshot()}
+              disabled={reloading}
+              title="Reload latest market snapshot"
+              className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-md border bg-slate-900 border-slate-800 text-slate-300 hover:text-white hover:border-cyan-500/50 transition cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${reloading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">Reload</span>
+            </button>
           </div>
         </div>
       </header>
