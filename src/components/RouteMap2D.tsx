@@ -87,18 +87,29 @@ export function RouteMap2D({
         stopsBySys: new Map<number, number[]>(),
         approachLabels: new Map<number, string>(),
         finalDestSysId: null as number | null,
+        originStartSysId: null as number | null,
       };
     }
+
+    const isOriginToAll = !plan.finalDestName;
+    const firstOriginId = plan.originStationId ?? plan.stops[0]?.items[0]?.originStationId ?? 0;
+    const originStartSysId = isOriginToAll
+      ? plan.originSystemId ?? resolveStationSystemId(firstOriginId, universe, dataset)
+      : null;
+    const approachTargetSysId =
+      isOriginToAll && originStartSysId && originStartSysId > 0
+        ? originStartSysId
+        : plan.stops[0]?.systemId ?? 0;
 
     const approachPath: number[] = [];
     const approachLabels = new Map<number, string>();
     const app = plan.approach;
-    if (app && plan.stops[0]?.systemId > 0) {
+    if (app && approachTargetSysId > 0) {
       const appWaypoints = [
         app.currentSystemId,
         app.buySystemId,
         app.sellSystemId,
-        plan.stops[0].systemId,
+        approachTargetSysId,
       ].filter((id) => id > 0);
       if (appWaypoints.length > 0) {
         approachPath.push(appWaypoints[0]);
@@ -123,13 +134,16 @@ export function RouteMap2D({
       if (app.buySystemId > 0 && app.buySystemId !== app.currentSystemId) {
         approachLabels.set(app.buySystemId, 'BUY');
       }
-      if (app.sellSystemId > 0 && app.sellSystemId !== plan.stops[0].systemId) {
+      if (app.sellSystemId > 0 && app.sellSystemId !== approachTargetSysId) {
         const existing = approachLabels.get(app.sellSystemId);
         approachLabels.set(app.sellSystemId, existing ? `${existing}/SELL` : 'SELL');
       }
     }
 
-    const waypoints: { systemId: number; stopNum?: number; isFinalDest?: boolean }[] = [];
+    const waypoints: { systemId: number; stopNum?: number; isFinalDest?: boolean; isOriginStart?: boolean }[] = [];
+    if (originStartSysId && originStartSysId > 0) {
+      waypoints.push({ systemId: originStartSysId, isOriginStart: true });
+    }
     plan.stops.forEach((s, idx) => {
       if (s.systemId > 0) waypoints.push({ systemId: s.systemId, stopNum: idx + 1 });
     });
@@ -148,6 +162,7 @@ export function RouteMap2D({
         stopsBySys: new Map<number, number[]>(),
         approachLabels,
         finalDestSysId: null as number | null,
+        originStartSysId: null as number | null,
       };
     }
 
@@ -180,6 +195,7 @@ export function RouteMap2D({
       stopsBySys,
       approachLabels,
       finalDestSysId,
+      originStartSysId,
     };
   }, [universe, plan, dataset, routePref]);
 
@@ -530,6 +546,7 @@ export function RouteMap2D({
         routeContext.approachLabels.has(n.systemId) ||
         routeContext.stopsBySys.has(n.systemId) ||
         routeContext.finalDestSysId === n.systemId ||
+        routeContext.originStartSysId === n.systemId ||
         n.isTopHub ||
         n.isTopFw ||
         n.systemId === hoveredSysId
@@ -686,7 +703,8 @@ export function RouteMap2D({
                 const appLabel = routeContext.approachLabels.get(node.systemId);
                 const stopNums = routeContext.stopsBySys.get(node.systemId) ?? [];
                 const isFinalDest = routeContext.finalDestSysId === node.systemId;
-                const isImportant = !!appLabel || stopNums.length > 0 || isFinalDest;
+                const isOriginStart = routeContext.originStartSysId === node.systemId;
+                const isImportant = !!appLabel || stopNums.length > 0 || isFinalDest || isOriginStart;
                 const isHovered = node.systemId === hoveredSysId;
                 const secColor = getSecColor(node.sec);
                 const radius = (isImportant ? 2.6 : 1.5) * invScale;
@@ -697,7 +715,13 @@ export function RouteMap2D({
                       <circle
                         r={radius + 1.5 * invScale}
                         fill="none"
-                        stroke={isFinalDest ? '#34d399' : stopNums.length > 0 ? '#22d3ee' : '#f59e0b'}
+                        stroke={
+                          isFinalDest || isOriginStart
+                            ? '#34d399'
+                            : stopNums.length > 0
+                            ? '#22d3ee'
+                            : '#f59e0b'
+                        }
                         strokeWidth={0.9 * invScale}
                       />
                     )}
@@ -713,6 +737,15 @@ export function RouteMap2D({
                         className="fill-emerald-300 font-bold"
                       >
                         DEST
+                      </text>
+                    ) : isOriginStart ? (
+                      <text
+                        y={-(radius + 3 * invScale)}
+                        textAnchor="middle"
+                        fontSize={6.5 * invScale}
+                        className="fill-emerald-300 font-bold"
+                      >
+                        BUY
                       </text>
                     ) : stopNums.length > 0 ? (
                       <text

@@ -66,6 +66,29 @@ function calcOrderBookTotal(
   return total;
 }
 
+function getCombinedPlanJumps(plan: SavedTripPlan): {
+  combinedJumps: number;
+  extraJumps: number;
+} {
+  if (!plan.approach) {
+    return { combinedJumps: plan.totalJumps, extraJumps: 0 };
+  }
+  const isOriginToAll = !plan.finalDestName;
+  if (isOriginToAll) {
+    return {
+      combinedJumps: plan.totalJumps + plan.approach.totalJumps,
+      extraJumps: plan.approach.totalJumps,
+    };
+  }
+  const assumedFirstLeg = plan.stops[0]?.jumpsFromPrev ?? 0;
+  const combinedJumps =
+    plan.approach.totalJumps + Math.max(0, plan.totalJumps - assumedFirstLeg);
+  return {
+    combinedJumps,
+    extraJumps: combinedJumps - plan.totalJumps,
+  };
+}
+
 function formatRelativeAgo(ts: number, now: number): string {
   const mins = Math.max(0, Math.floor((now - ts) / 60000));
   if (mins < 1) return 'Just now';
@@ -440,10 +463,19 @@ export function MyPlansModal({
     }
     for (const stop of activePlan.stops) {
       for (const it of stop.items) {
-        if (`${activePlan.uid}:${stop.stationId}:${it.typeId}` === expandedItemKey) {
+        const effOrigStationId =
+          !activePlan.finalDestName &&
+          activePlan.originStationId &&
+          it.originStationId === it.destStationId
+            ? activePlan.originStationId
+            : it.originStationId;
+        if (
+          `${activePlan.uid}:${stop.stationId}:${it.typeId}` === expandedItemKey ||
+          `${activePlan.uid}:orig:${it.destStationId}:${it.typeId}` === expandedItemKey
+        ) {
           return {
             item: it,
-            origMeta: resolveStationMeta(it.originStationId, it.originRegionId),
+            origMeta: resolveStationMeta(effOrigStationId, it.originRegionId),
             destMeta: resolveStationMeta(it.destStationId, it.destRegionId),
           };
         }
@@ -620,7 +652,7 @@ export function MyPlansModal({
     const routeLabel = (plan.routePref ?? routePref) === 'highsec' ? 'High-Sec' : 'Shortest';
 
     const combinedProfit = plan.totalProfit + (plan.approach?.totalProfit ?? 0);
-    const combinedJumps = plan.totalJumps + (plan.approach?.totalJumps ?? 0);
+    const { combinedJumps } = getCombinedPlanJumps(plan);
     const combinedIskPerJump = combinedProfit / Math.max(1, combinedJumps);
 
     const lines: string[] = [
@@ -671,16 +703,25 @@ export function MyPlansModal({
       for (const it of a.items) {
         lines.push(formatItemLine(it));
       }
-      const sameSellOri = a.sellStationId === plan.stops[0]?.stationId;
+      const isOriginToAll = !plan.finalDestName;
+      const oriStartId = isOriginToAll
+        ? plan.originStationId ?? plan.stops[0]?.items[0]?.originStationId
+        : plan.stops[0]?.stationId;
+      const sameSellOri = a.sellStationId === oriStartId;
       lines.push(
         `  SELL (+${a.jumpsBuyToSell}j): ${formatStationForCopy(a.sellStationName)}${
-          !sameSellOri ? ` (+${a.jumpsSellToOri}j to Stop #1)` : ''
+          !sameSellOri ? ` (+${a.jumpsSellToOri}j to ${isOriginToAll ? 'Buy Hub' : 'Stop #1'})` : ''
         }`
       );
     }
 
     lines.push('');
     lines.push(`[MAIN PLAN] (+${formatISK(plan.totalProfit, true)} ISK | ${plan.totalJumps}j | ${formatISK(plan.iskPerJump, true)}/j)`);
+    const isOriginToAll = !plan.finalDestName;
+    const origStartName = plan.originStationName ?? plan.stops[0]?.items[0]?.originStationName;
+    if (isOriginToAll && origStartName) {
+      lines.push(`  BUY (0j): ${formatStationForCopy(origStartName)}`);
+    }
     for (let i = 0; i < plan.stops.length; i++) {
       const s = plan.stops[i];
       const stopCost = s.items.reduce((sum, it) => sum + it.savedCost, 0);
@@ -694,7 +735,9 @@ export function MyPlansModal({
       const stopBudgetPct = effBudget > 0 ? ` (${Math.round((stopCost / effBudget) * 100)}%)` : '';
 
       lines.push(
-        `  Stop #${i + 1} (+${s.jumpsFromPrev}j${s.security !== null ? ` | ${s.security.toFixed(1)}` : ''} | BUY): ${formatStationForCopy(s.stationName)}`
+        `  Stop #${i + 1} (+${s.jumpsFromPrev}j${s.security !== null ? ` | ${s.security.toFixed(1)}` : ''} | ${
+          isOriginToAll ? 'SELL' : 'BUY'
+        }): ${formatStationForCopy(s.stationName)}`
       );
       lines.push(
         `  Metrics: ${formatISK(stopProfit / stopJumps, true)}/j | Cargo ${formatVolume(stopVol)}${stopCargoPct} | Budget ${formatISK(stopCost, true)}${stopBudgetPct} | +${formatISK(stopProfit, true)} ISK`
@@ -733,11 +776,15 @@ export function MyPlansModal({
       };
 
       const queries: { regionId: number; typeId: number; stationIds: number[] }[] = [];
-      const addItem = (it: SavedPlanItem) => {
-        const origReg = resolveRegionId(it.originStationId, it.originRegionId);
+      const addItem = (it: SavedPlanItem, plan?: SavedTripPlan) => {
+        const effOrigStationId =
+          plan && !plan.finalDestName && plan.originStationId && it.originStationId === it.destStationId
+            ? plan.originStationId
+            : it.originStationId;
+        const origReg = resolveRegionId(effOrigStationId, it.originRegionId);
         const destReg = resolveRegionId(it.destStationId, it.destRegionId);
-        if (origReg > 0 && it.originStationId > 0) {
-          queries.push({ regionId: origReg, typeId: it.typeId, stationIds: [it.originStationId] });
+        if (origReg > 0 && effOrigStationId > 0) {
+          queries.push({ regionId: origReg, typeId: it.typeId, stationIds: [effOrigStationId] });
         }
         if (destReg > 0 && it.destStationId > 0) {
           queries.push({ regionId: destReg, typeId: it.typeId, stationIds: [it.destStationId] });
@@ -746,10 +793,10 @@ export function MyPlansModal({
 
       for (const plan of plans) {
         if (plan.approach) {
-          for (const it of plan.approach.items) addItem(it);
+          for (const it of plan.approach.items) addItem(it, plan);
         }
         for (const stop of plan.stops) {
-          for (const it of stop.items) addItem(it);
+          for (const it of stop.items) addItem(it, plan);
         }
       }
 
@@ -1316,8 +1363,7 @@ export function MyPlansModal({
                       )
                     : 0;
                   const actualTotalProfit = mainLiveProfit + approachLiveProfit;
-                  const approachJumps = activePlan.approach?.totalJumps ?? 0;
-                  const combinedJumps = activePlan.totalJumps + approachJumps;
+                  const { combinedJumps, extraJumps } = getCombinedPlanJumps(activePlan);
                   const mainIskPerJump = mainLiveProfit / Math.max(1, activePlan.totalJumps);
                   const combinedIskPerJump = actualTotalProfit / Math.max(1, combinedJumps);
                   return (
@@ -1397,7 +1443,8 @@ export function MyPlansModal({
                               <div className="font-bold text-sm text-cyan-300">{combinedJumps}j</div>
                               {activePlan.approach && (
                                 <div className="text-[10px] text-slate-400 truncate">
-                                  Main {activePlan.totalJumps}j + App {approachJumps}j
+                                  Main {activePlan.totalJumps}j{' '}
+                                  {extraJumps >= 0 ? `+ ${extraJumps}j` : `- ${Math.abs(extraJumps)}j`} App
                                 </div>
                               )}
                             </div>
@@ -1492,9 +1539,13 @@ export function MyPlansModal({
 
                     {activePlan.approach && (() => {
                       const app = activePlan.approach;
+                      const isOriginToAll = !activePlan.finalDestName;
                       const oriStop = activePlan.stops[0];
+                      const oriStartId = isOriginToAll
+                        ? activePlan.originStationId ?? oriStop?.items[0]?.originStationId
+                        : oriStop?.stationId;
                       const sameCurBuy = app.currentStationId === app.buyStationId;
-                      const sameSellOri = app.sellStationId === oriStop?.stationId;
+                      const sameSellOri = app.sellStationId === oriStartId;
                       return (
                         <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
                           {!sameCurBuy && (
@@ -1601,7 +1652,7 @@ export function MyPlansModal({
                             </div>
                             {!sameSellOri && oriStop && (
                               <span className="text-[10px] text-slate-300 shrink-0 tabular-nums">
-                                +{app.jumpsSellToOri}j to Stop #1
+                                +{app.jumpsSellToOri}j to {isOriginToAll ? 'Buy Hub' : 'Stop #1'}
                               </span>
                             )}
                           </div>
@@ -1612,7 +1663,88 @@ export function MyPlansModal({
 
                 {/* Stops (matching Auto Trip Plans card style) */}
                 <div className="space-y-2">
+                  {(() => {
+                    const isOriginToAll = !activePlan.finalDestName;
+                    const originStartId =
+                      activePlan.originStationId ??
+                      activePlan.stops[0]?.items[0]?.originStationId ??
+                      0;
+                    const originStartName =
+                      activePlan.originStationName ??
+                      activePlan.stops[0]?.items[0]?.originStationName ??
+                      null;
+                    if (!isOriginToAll || !originStartName) return null;
+                    const allBuyItems = activePlan.stops.flatMap((s) => s.items);
+                    const totalBuyCost = allBuyItems.reduce((sum, it) => sum + it.savedCost, 0);
+                    const totalBuyVol = allBuyItems.reduce(
+                      (sum, it) => sum + it.qty * it.unitVolume,
+                      0
+                    );
+                    const totalBuyProfit = allBuyItems.reduce((sum, it) => sum + it.savedProfit, 0);
+                    const totalBuyIskPerJump =
+                      totalBuyProfit / Math.max(1, activePlan.totalJumps);
+                    return (
+                      <div className="rounded-lg bg-black/20 border border-white/5 p-2.5 space-y-1.5 text-xs">
+                        <div className="rounded bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                            <span
+                              title="Starting origin hub"
+                              className="text-[10px] font-medium text-emerald-200 bg-emerald-500/15 border border-emerald-500/35 px-1.5 py-0.5 rounded-full shrink-0 tabular-nums"
+                            >
+                              0j
+                            </span>
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/15 text-emerald-300 shrink-0">
+                              BUY
+                            </span>
+                            <span className="font-medium text-emerald-100 truncate">
+                              {originStartName}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleCopyStation(
+                                  originStartName,
+                                  `orig:${originStartId || activePlan.uid}`
+                                )
+                              }
+                              title="Copy station name"
+                              className="p-0.5 rounded text-slate-500 hover:text-white cursor-pointer shrink-0"
+                            >
+                              {copiedKey === `orig:${originStartId || activePlan.uid}` ? (
+                                <Check className="w-3 h-3 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3 h-3" />
+                              )}
+                            </button>
+                            {renderStationListCopyButton(
+                              allBuyItems,
+                              `mb-orig:${originStartId || activePlan.uid}`,
+                              'buy'
+                            )}
+                          </div>
+                        </div>
+
+                        {renderStopMetricsBar(
+                          totalBuyIskPerJump,
+                          totalBuyCost,
+                          totalBuyVol,
+                          maxBudget,
+                          maxCargo
+                        )}
+
+                        <div className="divide-y divide-slate-800/60">
+                          {allBuyItems.map((it) =>
+                            renderPlanItemRow(
+                              it,
+                              `${activePlan.uid}:orig:${it.destStationId}:${it.typeId}`
+                            )
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {activePlan.stops.map((stop, idx) => {
+                    const isOriginToAll = !activePlan.finalDestName;
                     const stopCost = stop.items.reduce((sum, it) => sum + it.savedCost, 0);
                     const stopVol = stop.items.reduce((sum, it) => sum + it.qty * it.unitVolume, 0);
                     const stopProfit = stop.items.reduce((sum, it) => sum + it.savedProfit, 0);
@@ -1627,11 +1759,21 @@ export function MyPlansModal({
                       key={`${stop.stationId}-${idx}`}
                       className="rounded-lg bg-black/20 border border-white/5 p-2.5 space-y-1.5 text-xs"
                     >
-                      <div className="rounded bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <div
+                        className={`rounded border px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 ${
+                          isOriginToAll
+                            ? 'bg-rose-500/10 border-rose-500/25'
+                            : 'bg-emerald-500/10 border-emerald-500/25'
+                        }`}
+                      >
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span
                             title="Jumps from previous point"
-                            className="text-[10px] font-medium text-emerald-200 bg-emerald-500/15 border border-emerald-500/35 px-1.5 py-0.5 rounded-full shrink-0 tabular-nums"
+                            className={`text-[10px] font-medium border px-1.5 py-0.5 rounded-full shrink-0 tabular-nums ${
+                              isOriginToAll
+                                ? 'text-rose-200 bg-rose-500/15 border-rose-500/35'
+                                : 'text-emerald-200 bg-emerald-500/15 border-emerald-500/35'
+                            }`}
                           >
                             +{stop.jumpsFromPrev}j
                           </span>
@@ -1649,10 +1791,22 @@ export function MyPlansModal({
                               {stop.security.toFixed(1)}
                             </span>
                           )}
-                          <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/15 text-emerald-300 shrink-0">
-                            BUY
+                          <span
+                            className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border shrink-0 ${
+                              isOriginToAll
+                                ? 'border-rose-500/35 bg-rose-500/15 text-rose-300'
+                                : 'border-emerald-500/35 bg-emerald-500/15 text-emerald-300'
+                            }`}
+                          >
+                            {isOriginToAll ? 'SELL' : 'BUY'}
                           </span>
-                          <span className="font-medium text-emerald-100 truncate">{stop.stationName}</span>
+                          <span
+                            className={`font-medium truncate ${
+                              isOriginToAll ? 'text-rose-100' : 'text-emerald-100'
+                            }`}
+                          >
+                            {stop.stationName}
+                          </span>
                           <button
                             type="button"
                             onClick={() => handleCopyStation(stop.stationName, `st:${stop.stationId}`)}
@@ -1665,7 +1819,11 @@ export function MyPlansModal({
                               <Copy className="w-3 h-3" />
                             )}
                           </button>
-                          {renderStationListCopyButton(stop.items, `mb-st:${stop.stationId}`, 'buy')}
+                          {renderStationListCopyButton(
+                            stop.items,
+                            `${isOriginToAll ? 'ms' : 'mb'}-st:${stop.stationId}`,
+                            isOriginToAll ? 'sell' : 'buy'
+                          )}
                         </div>
                       </div>
 

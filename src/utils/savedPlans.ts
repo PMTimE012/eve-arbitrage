@@ -79,6 +79,9 @@ export interface SavedTripPlan {
   maxBudget?: number;
   maxCargo?: number;
   routePref?: RoutePreference;
+  originStationId?: number;
+  originStationName?: string;
+  originSystemId?: number;
   finalDestName?: string;
   jumpsToFinalDest: number;
   totalJumps: number;
@@ -159,6 +162,18 @@ export function createSavedPlanFromTripPlan(
     maxBudget: meta.maxBudget,
     maxCargo: meta.maxCargo,
     routePref: meta.routePref,
+    originStationId:
+      meta.originStation && meta.originStation.stationId !== -1
+        ? meta.originStation.stationId
+        : undefined,
+    originStationName:
+      meta.originStation && meta.originStation.stationId !== -1
+        ? meta.originStation.stationName
+        : undefined,
+    originSystemId:
+      meta.originStation && meta.originStation.stationId !== -1
+        ? meta.originStation.systemId
+        : undefined,
     finalDestName: plan.finalDestName,
     jumpsToFinalDest: plan.jumpsToFinalDest,
     totalJumps: plan.totalJumps,
@@ -173,24 +188,41 @@ export function createSavedPlanFromTripPlan(
       systemId: stop.systemId,
       security: stop.security,
       jumpsFromPrev: stop.jumpsFromPrev,
-      items: stop.items.map((it) => ({
-        typeId: it.typeId,
-        name: it.name,
-        qty: it.qty,
-        unitVolume: it.unitVolume,
-        originStationId: it.opp.originStationId ?? it.stationId ?? meta.originStation?.stationId ?? 0,
-        originStationName: it.opp.originStationName ?? it.stationName ?? meta.originStation?.stationName ?? 'Unknown',
-        originRegionId: it.opp.originRegionId ?? meta.originStation?.regionId,
-        destStationId: it.opp.destStationId ?? meta.destStation?.stationId ?? 0,
-        destStationName: it.opp.destStationName ?? plan.finalDestName ?? meta.destStation?.stationName ?? 'Unknown',
-        destRegionId: it.opp.destRegionId ?? meta.destStation?.regionId,
-        savedBuyPrice: it.buyPrice,
-        savedSellPrice: it.sellPrice,
-        savedCost: it.totalCost,
-        savedProfit: it.totalProfit,
-        savedRoiPct: it.roiPct,
-        savedScore: it.tradeScore,
-      })),
+      items: stop.items.map((it) => {
+        const hasSingleOrigin = Boolean(meta.originStation && meta.originStation.stationId !== -1);
+        const hasSingleDest = Boolean(meta.destStation && meta.destStation.stationId !== -1);
+        return {
+          typeId: it.typeId,
+          name: it.name,
+          qty: it.qty,
+          unitVolume: it.unitVolume,
+          originStationId:
+            it.opp.originStationId ??
+            (hasSingleOrigin ? meta.originStation!.stationId : it.stationId) ??
+            0,
+          originStationName:
+            it.opp.originStationName ??
+            (hasSingleOrigin ? meta.originStation!.stationName : it.stationName) ??
+            'Unknown',
+          originRegionId: it.opp.originRegionId ?? meta.originStation?.regionId,
+          destStationId:
+            it.opp.destStationId ??
+            (hasSingleDest ? meta.destStation!.stationId : it.stationId) ??
+            0,
+          destStationName:
+            it.opp.destStationName ??
+            plan.finalDestName ??
+            (hasSingleDest ? meta.destStation!.stationName : it.stationName) ??
+            'Unknown',
+          destRegionId: it.opp.destRegionId ?? meta.destStation?.regionId,
+          savedBuyPrice: it.buyPrice,
+          savedSellPrice: it.sellPrice,
+          savedCost: it.totalCost,
+          savedProfit: it.totalProfit,
+          savedRoiPct: it.roiPct,
+          savedScore: it.tradeScore,
+        };
+      }),
     })),
   };
 }
@@ -218,8 +250,14 @@ export function evaluateSavedPlanItem(
   empireData: EmpireInstantDataset | null,
   liveBooks: Record<number, Record<string, HubBook>>
 ): LiveItemEvaluation {
+  const effOriginStationId =
+    !plan.finalDestName &&
+    plan.originStationId &&
+    item.originStationId === item.destStationId
+      ? plan.originStationId
+      : item.originStationId;
   const origEntry = getStationItemEntry(
-    item.originStationId,
+    effOriginStationId,
     item.typeId,
     dataset,
     empireData,
@@ -456,13 +494,24 @@ export function buildEnRouteApproachLeg(
   maxCargo: number,
   liveBooks?: Record<number, Record<string, HubBook>>
 ): { approach: SavedApproachLeg | null; reason?: string } {
-  const oriStop = plan.stops[0];
-  if (!oriStop) {
+  const firstStop = plan.stops[0];
+  if (!firstStop) {
     return { approach: null, reason: 'Plan has no starting stop.' };
   }
   if (!dataset || !universe) {
     return { approach: null, reason: 'Market or universe data is still loading.' };
   }
+  const isOriginToAll = !plan.finalDestName;
+  const originBuyStationId =
+    plan.originStationId ?? firstStop.items[0]?.originStationId ?? firstStop.stationId;
+  const resolvedOriginSysId =
+    plan.originSystemId ??
+    universe.stations.find((s) => s[0] === originBuyStationId)?.[2] ??
+    firstStop.systemId;
+  const oriStop = isOriginToAll
+    ? { stationId: originBuyStationId, systemId: resolvedOriginSysId }
+    : firstStop;
+
   if (currentStation.stationId === oriStop.stationId) {
     return { approach: null, reason: 'Current location is already the starting station (Ori).' };
   }
