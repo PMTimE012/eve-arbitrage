@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
   schedule:
-    # Refresh market snapshot every 30 minutes
-    - cron: '*/30 * * * *'
+    # Refresh market snapshot every 30 minutes (off-peak prime minutes to avoid :00/:30 queue congestion)
+    - cron: '11,41 * * * *'
   workflow_dispatch:
 
 permissions:
