@@ -1360,6 +1360,9 @@ export function App() {
                 theme={theme}
                 data={trendingData}
                 dataset={dataset}
+                universe={universe}
+                maxBudget={maxBudget}
+                maxCargo={maxCargo}
                 salesTaxPct={salesTaxPct}
                 brokerFeePct={brokerFeePct}
                 loading={trendingLoading}
@@ -1371,6 +1374,8 @@ export function App() {
                     ALL_HUBS_OPTION;
                   setOriginStation(ALL_HUBS_OPTION);
                   setDestStation(targetStation);
+                  setBuyMethod('instant');
+                  setTradeMode('patient');
                   setSearchQuery(itemName);
                   setExpandedId(null);
                   setActiveTab('arbitrage');

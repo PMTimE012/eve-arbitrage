@@ -105,9 +105,13 @@ export function RouteMap2D({
     const approachLabels = new Map<number, string>();
     const app = plan.approach;
     if (app && approachTargetSysId > 0) {
+      const buySysIds =
+        app.buyStops && app.buyStops.length > 0
+          ? app.buyStops.map((b) => b.systemId)
+          : [app.buySystemId];
       const appWaypoints = [
         app.currentSystemId,
-        app.buySystemId,
+        ...buySysIds,
         app.sellSystemId,
         approachTargetSysId,
       ].filter((id) => id > 0);
@@ -128,12 +132,16 @@ export function RouteMap2D({
       if (app.currentSystemId > 0) {
         approachLabels.set(
           app.currentSystemId,
-          app.buySystemId === app.currentSystemId ? 'CUR/BUY' : 'CUR'
+          buySysIds.includes(app.currentSystemId) ? 'CUR/BUY' : 'CUR'
         );
       }
-      if (app.buySystemId > 0 && app.buySystemId !== app.currentSystemId) {
-        approachLabels.set(app.buySystemId, 'BUY');
-      }
+      buySysIds.forEach((bSysId, idx) => {
+        if (bSysId > 0 && bSysId !== app.currentSystemId) {
+          const label = buySysIds.length > 1 ? `BUY ${idx + 1}` : 'BUY';
+          const existing = approachLabels.get(bSysId);
+          if (!existing) approachLabels.set(bSysId, label);
+        }
+      });
       if (app.sellSystemId > 0 && app.sellSystemId !== approachTargetSysId) {
         const existing = approachLabels.get(app.sellSystemId);
         approachLabels.set(app.sellSystemId, existing ? `${existing}/SELL` : 'SELL');

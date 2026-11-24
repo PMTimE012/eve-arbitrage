@@ -620,7 +620,7 @@ async function fetchMarketHistory(targetRegionIds, sde) {
   const days7 = Math.min(7, daysLoaded);
   const days14 = Math.min(14, daysLoaded);
 
-  // Per `${regId}:${typeId}` accumulate 7d/30d stats + 14d sparkline
+  // Per `${regId}:${typeId}` accumulate 1d / 7d / 14d / 30d stats
   const statsMap = new Map();
 
   for (let dayIdx = 0; dayIdx < daysLoaded; dayIdx++) {
@@ -657,40 +657,48 @@ async function fetchMarketHistory(targetRegionIds, sde) {
         rec = {
           regId,
           typeId,
+          avg1d: 0,
+          low1d: 0,
+          high1d: 0,
+          vol1d: 0,
+          buyShare1d: 0,
+          sum7: 0,
+          priceVol7: 0,
+          active7: 0,
           sum14: 0,
           sum30: 0,
           totalActive14: 0,
           sellHighWeighted14: 0,
           sellHighWeighted30: 0,
-          buySum14: 0,
-          buySum30: 0,
-          active14: 0,
-          buyIsk14: 0,
-          buyVols14: new Array(days14).fill(0),
-          buySpark14: new Array(days14).fill(0),
         };
         statsMap.set(key, rec);
       }
 
       rec.sum30 += vol;
       rec.sellHighWeighted30 += high * vol;
-      rec.buySum30 += buyerVol;
+      if (dayIdx === 0 && avgPrice > 0) {
+        rec.avg1d = avgPrice;
+        rec.low1d = low;
+        rec.high1d = high;
+        rec.vol1d = vol;
+        rec.buyShare1d = buyShare;
+      }
+      if (dayIdx < days7) {
+        rec.sum7 += vol;
+        if (avgPrice > 0) rec.priceVol7 += avgPrice * vol;
+        rec.active7++;
+      }
       if (dayIdx < days14) {
         rec.sum14 += vol;
         rec.totalActive14++;
         rec.sellHighWeighted14 += high * vol;
-        rec.buySum14 += buyerVol;
-        if (buyerVol >= 0.5) rec.active14++;
-        rec.buyIsk14 += avgPrice * buyerVol;
-        rec.buyVols14[dayIdx] = Math.round(buyerVol * 10) / 10;
-        // Store oldest -> newest
-        rec.buySpark14[days14 - 1 - dayIdx] = Math.round(buyerVol);
       }
     }
   }
 
   const history7d = {};
   const historySellPrice7d = {};
+  const historyAvg1d = {};
   const historyTrend7d = {};
   const historyActive14d = {};
   const byRegionTrending = new Map();
@@ -725,33 +733,36 @@ async function fetchMarketHistory(targetRegionIds, sde) {
         if (!historySellPrice7d[rec.regId]) historySellPrice7d[rec.regId] = {};
         historySellPrice7d[rec.regId][rec.typeId] = avgSellPrice;
       }
+      if (rec.avg1d > 0 && rec.vol1d > 0 && rec.active7 >= 2) {
+        if (!historyAvg1d[rec.regId]) historyAvg1d[rec.regId] = {};
+        historyAvg1d[rec.regId][rec.typeId] = Math.round(rec.avg1d * 100) / 100;
+      }
 
-      // Build trending candidates using Buyer-Driven Volume (Median 14d vs Avg 30d)
+      // Build 1-day Avg Price & Vol candidates for Sell-Order comparison
       const itemMeta = sde.items[rec.typeId];
       if (!itemMeta) continue;
-      const buyPressurePct = rec.sum14 > 0 ? (rec.buySum14 / rec.sum14) * 100 : 0;
-      if (buyPressurePct < 50) continue; // Only items mostly bought from Sell Orders
-      const med14 = computeMedian(rec.buyVols14);
-      if (med14 < 10) continue;
-      const avg30 = rec.buySum30 / daysLoaded;
-      if (avg30 <= 0 || med14 <= avg30) continue;
-      if (rec.active14 < 6) continue;
-      const iskVol14d = days14 > 0 ? rec.buyIsk14 / days14 : 0;
-      if (iskVol14d < 500_000) continue;
+      if (rec.vol1d <= 0 || rec.avg1d <= 0) continue;
+      const iskVol1d = rec.avg1d * rec.vol1d;
+      if (iskVol1d < 500_000) continue;
+      if (rec.active7 < 2) continue;
 
-      const trendPct = ((med14 - avg30) / avg30) * 100;
+      const avg7dPrice = rec.sum7 > 0 && rec.priceVol7 > 0 ? rec.priceVol7 / rec.sum7 : rec.avg1d;
+      const vol7dAvg = days7 > 0 ? rec.sum7 / days7 : rec.vol1d;
+
       const entry = {
         regionId: rec.regId,
         regionName: sde.regions[rec.regId] || String(rec.regId),
         typeId: rec.typeId,
         name: itemMeta.n,
-        med7d: Math.round(med14 * 10) / 10,
-        avg30d: Math.round(avg30 * 10) / 10,
-        trendPct: Math.round(trendPct * 10) / 10,
-        activeDays7: rec.active14,
-        iskVol7d: Math.round(iskVol14d),
-        buyPressurePct: Math.round(buyPressurePct),
-        spark14: rec.buySpark14,
+        avg1d: Math.round(rec.avg1d * 100) / 100,
+        low1d: Math.round(rec.low1d * 100) / 100,
+        high1d: Math.round(rec.high1d * 100) / 100,
+        vol1d: Math.round(rec.vol1d),
+        iskVol1d: Math.round(iskVol1d),
+        buyPressure1d: Math.round(rec.buyShare1d * 100),
+        avg7dPrice: Math.round(avg7dPrice * 100) / 100,
+        vol7dAvg: Math.round(vol7dAvg * 10) / 10,
+        activeDays7: rec.active7,
       };
 
       if (!byRegionTrending.has(rec.regId)) byRegionTrending.set(rec.regId, []);
@@ -761,10 +772,10 @@ async function fetchMarketHistory(targetRegionIds, sde) {
 
   const trendingItems = [];
   for (const list of byRegionTrending.values()) {
-    list.sort((a, b) => b.trendPct - a.trendPct);
-    trendingItems.push(...list.slice(0, 80));
+    list.sort((a, b) => b.iskVol1d - a.iskVol1d);
+    trendingItems.push(...list.slice(0, 500));
   }
-  trendingItems.sort((a, b) => b.trendPct - a.trendPct);
+  trendingItems.sort((a, b) => b.iskVol1d - a.iskVol1d);
 
   const trendingRegions = Array.from(regionSet)
     .map((id) => ({ id, name: sde.regions[id] || String(id) }))
@@ -776,6 +787,7 @@ async function fetchMarketHistory(targetRegionIds, sde) {
   return {
     history7d,
     historySellPrice7d,
+    historyAvg1d,
     historyTrend7d,
     historyActive14d,
     trending: {
@@ -907,7 +919,14 @@ async function main() {
   }
 
   const routes = computeRoutesLocally(HUBS, allTargetStations, sde);
-  const { history7d, historySellPrice7d, historyTrend7d, historyActive14d, trending } = await fetchMarketHistory(Array.from(regionsToFetch), sde);
+  const {
+    history7d,
+    historySellPrice7d,
+    historyAvg1d,
+    historyTrend7d,
+    historyActive14d,
+    trending,
+  } = await fetchMarketHistory(Array.from(regionsToFetch), sde);
 
   // Build Empire-Wide High/Low-Sec Instant-Sell Candidate Index
   // Reference benchmarks across the 5 Major Hubs so we only keep items that can beat at least one Hub!
@@ -1034,6 +1053,7 @@ async function main() {
       jumpsFromHubs,
       history7d,
       historySellPrice7d,
+      historyAvg1d,
       historyTrend7d,
       historyActive14d,
       items: sde.items,

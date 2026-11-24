@@ -94,6 +94,7 @@ export interface MarketDataset {
   jumpsFromHubs?: Record<string, Record<string, number>>;
   history7d?: Record<string, Record<string, number>>;
   historySellPrice7d?: Record<string, Record<string, number>>;
+  historyAvg1d?: Record<string, Record<string, number>>;
   historyTrend7d?: Record<string, Record<string, number>>;
   historyActive14d?: Record<string, Record<string, number>>;
   items: Record<string, ItemMeta>;
@@ -198,13 +199,15 @@ export interface TrendingMarketItem {
   regionName: string;
   typeId: number;
   name: string;
-  med7d: number;
-  avg30d: number;
-  trendPct: number;
+  avg1d: number;
+  low1d: number;
+  high1d: number;
+  vol1d: number;
+  iskVol1d: number;
+  buyPressure1d: number;
+  avg7dPrice: number;
+  vol7dAvg: number;
   activeDays7: number;
-  iskVol7d: number;
-  buyPressurePct?: number;
-  spark14: number[];
 }
 
 export interface TrendingDataset {

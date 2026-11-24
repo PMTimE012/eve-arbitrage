@@ -58,6 +58,8 @@ export interface TripPlan {
   id: string;
   title: string;
   subtitle: string;
+  mode?: 'allToDest' | 'originToAll' | 'single';
+  originStationName?: string;
   stops: TripStop[];
   finalDestName?: string;
   jumpsToFinalDest: number;
@@ -340,43 +342,94 @@ export function generateTripPlans(params: {
   const isDestAll = destStation.stationId === -1;
 
   if (isOriginAll && isDestAll) {
-    // Group All->All candidates by Destination Station and build multi-stop corridor plans for Top 6 destinations
-    const destMap = new Map<
-      number,
-      {
-        dest: StationOption;
-        totalProfit: number;
-        opps: ArbitrageOpportunity[];
-      }
-    >();
+    // Group All->All candidates by both Destination (All->Dest) and Origin (Origin->All)
+    // so routes like Jita->Amarr->Dodixie compete fairly by ISK/jump against multi-buy->1 dest.
+    interface StationGroup {
+      station: StationOption;
+      totalProfit: number;
+      bestIskPerJump: number;
+      opps: ArbitrageOpportunity[];
+    }
+    const destMap = new Map<number, StationGroup>();
+    const originMap = new Map<number, StationGroup>();
 
-    for (const opp of opportunities) {
-      if (!opp.destStationId || !opp.destSystemId) continue;
-      let grp = destMap.get(opp.destStationId);
+    const addGroup = (
+      map: Map<number, StationGroup>,
+      stId: number | undefined,
+      sysId: number | undefined,
+      stName: string | undefined,
+      sysName: string | undefined,
+      regId: number | undefined,
+      regName: string | undefined,
+      fallbackLabel: string,
+      opp: ArbitrageOpportunity
+    ) => {
+      if (!stId || !sysId) return;
+      let grp = map.get(stId);
       if (!grp) {
         grp = {
-          dest: {
-            stationId: opp.destStationId,
-            stationName: opp.destStationName ?? 'Destination',
-            systemId: opp.destSystemId,
-            systemName: opp.destSystemName ?? '',
-            regionId: opp.destRegionId ?? -1,
-            regionName: opp.destRegionName ?? '',
-            security: universe?.systems[String(opp.destSystemId)]?.[2] ?? 0.5,
+          station: {
+            stationId: stId,
+            stationName: stName ?? fallbackLabel,
+            systemId: sysId,
+            systemName: sysName ?? '',
+            regionId: regId ?? -1,
+            regionName: regName ?? '',
+            security: universe?.systems[String(sysId)]?.[2] ?? 0.5,
             hubKey: null,
           },
           totalProfit: 0,
+          bestIskPerJump: 0,
           opps: [],
         };
-        destMap.set(opp.destStationId, grp);
+        map.set(stId, grp);
       }
       grp.totalProfit += opp.totalProfit;
+      const j = Math.max(1, opp.destJumps ?? opp.originJumps ?? 1);
+      const ipj = opp.totalProfit / j;
+      if (ipj > grp.bestIskPerJump) grp.bestIskPerJump = ipj;
       grp.opps.push(opp);
+    };
+
+    for (const opp of opportunities) {
+      addGroup(
+        destMap,
+        opp.destStationId,
+        opp.destSystemId,
+        opp.destStationName,
+        opp.destSystemName,
+        opp.destRegionId,
+        opp.destRegionName,
+        'Destination',
+        opp
+      );
+      addGroup(
+        originMap,
+        opp.originStationId,
+        opp.originSystemId,
+        opp.originStationName,
+        opp.originSystemName,
+        opp.originRegionId,
+        opp.originRegionName,
+        'Origin',
+        opp
+      );
     }
 
-    const topDests = Array.from(destMap.values())
-      .sort((a, b) => b.totalProfit - a.totalProfit)
-      .slice(0, 6);
+    const pickTopGroups = (map: Map<number, StationGroup>, limit = 6): StationGroup[] => {
+      const all = Array.from(map.values());
+      const byProfit = [...all].sort((a, b) => b.totalProfit - a.totalProfit).slice(0, 4);
+      const byIpj = [...all].sort((a, b) => b.bestIskPerJump - a.bestIskPerJump).slice(0, 4);
+      const merged = new Map<number, StationGroup>();
+      for (const g of [...byProfit, ...byIpj]) {
+        if (!merged.has(g.station.stationId)) merged.set(g.station.stationId, g);
+        if (merged.size >= limit) break;
+      }
+      return Array.from(merged.values());
+    };
+
+    const topDests = pickTopGroups(destMap, 6);
+    const topOrigins = pickTopGroups(originMap, 6);
 
     const allPlans: TripPlan[] = [];
     const seenRouteSig = new Set<string>();
@@ -385,10 +438,24 @@ export function generateTripPlans(params: {
       const subPlans = generateTripPlans({
         ...params,
         opportunities: grp.opps,
-        destStation: grp.dest,
+        destStation: grp.station,
       });
       for (const p of subPlans) {
-        const sig = `${p.stops.map((s) => s.stationId).join(',')}->${grp.dest.stationId}`;
+        const sig = `in:${p.stops.map((s) => s.stationId).join(',')}->${grp.station.stationId}`;
+        if (seenRouteSig.has(sig)) continue;
+        seenRouteSig.add(sig);
+        allPlans.push(p);
+      }
+    }
+
+    for (const grp of topOrigins) {
+      const subPlans = generateTripPlans({
+        ...params,
+        opportunities: grp.opps,
+        originStation: grp.station,
+      });
+      for (const p of subPlans) {
+        const sig = `out:${grp.station.stationId}->${p.stops.map((s) => s.stationId).join(',')}`;
         if (seenRouteSig.has(sig)) continue;
         seenRouteSig.add(sig);
         allPlans.push(p);
@@ -638,6 +705,8 @@ export function generateTripPlans(params: {
       id,
       title,
       subtitle,
+      mode,
+      originStationName: mode === 'originToAll' || mode === 'single' ? originStation.stationName : undefined,
       stops,
       finalDestName: mode === 'allToDest' || mode === 'single' ? destStation.stationName : undefined,
       jumpsToFinalDest: endJumps,

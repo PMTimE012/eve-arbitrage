@@ -694,14 +694,28 @@ export function MyPlansModal({
           `  DEPART (0j${a.currentSecurity !== null ? ` | ${a.currentSecurity.toFixed(1)}` : ''}): ${formatStationForCopy(a.currentStationName)}`
         );
       }
-      lines.push(
-        `  BUY (+${a.jumpsCurToBuy}j${a.buySecurity !== null ? ` | ${a.buySecurity.toFixed(1)}` : ''}): ${formatStationForCopy(a.buyStationName)}`
-      );
-      lines.push(
-        `  Metrics: ${formatISK(a.iskPerJump, true)}/j | Cargo ${formatVolume(a.totalVolume)}${appCargoPct} | Budget ${formatISK(a.totalCost, true)}${appBudgetPct} | +${formatISK(a.totalProfit, true)} ISK`
-      );
-      for (const it of a.items) {
-        lines.push(formatItemLine(it));
+      if (a.buyStops && a.buyStops.length > 1) {
+        lines.push(
+          `  Metrics: ${formatISK(a.iskPerJump, true)}/j | Cargo ${formatVolume(a.totalVolume)}${appCargoPct} | Budget ${formatISK(a.totalCost, true)}${appBudgetPct} | +${formatISK(a.totalProfit, true)} ISK`
+        );
+        a.buyStops.forEach((bs, idx) => {
+          lines.push(
+            `  BUY #${idx + 1} (+${bs.jumpsFromPrev}j${bs.security !== null ? ` | ${bs.security.toFixed(1)}` : ''}): ${formatStationForCopy(bs.stationName)}`
+          );
+          for (const it of bs.items) {
+            lines.push(formatItemLine(it));
+          }
+        });
+      } else {
+        lines.push(
+          `  BUY (+${a.jumpsCurToBuy}j${a.buySecurity !== null ? ` | ${a.buySecurity.toFixed(1)}` : ''}): ${formatStationForCopy(a.buyStationName)}`
+        );
+        lines.push(
+          `  Metrics: ${formatISK(a.iskPerJump, true)}/j | Cargo ${formatVolume(a.totalVolume)}${appCargoPct} | Budget ${formatISK(a.totalCost, true)}${appBudgetPct} | +${formatISK(a.totalProfit, true)} ISK`
+        );
+        for (const it of a.items) {
+          lines.push(formatItemLine(it));
+        }
       }
       const isOriginToAll = !plan.finalDestName;
       const oriStartId = isOriginToAll
@@ -1261,15 +1275,11 @@ export function MyPlansModal({
             {/* Right Pane: Top Saved Settings Frame + (2D Map Left | Approach & Stops Right) */}
             {activePlan && (
               <div className="relative min-h-0 flex-1 flex flex-col overflow-hidden">
-                {(refreshing || fillingApproach) && (
+                {refreshing && (
                   <div className="absolute inset-0 z-20 bg-[#070b14]/70 backdrop-blur-[2px] flex items-center justify-center p-4">
                     <div className="rounded-xl border border-cyan-500/35 bg-[#0b1120]/95 px-4 py-3 shadow-2xl flex items-center gap-2.5 text-xs text-slate-100 font-medium">
                       <Loader2 className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
-                      <span>
-                        {fillingApproach
-                          ? 'Checking en-route market prices (ESI)...'
-                          : 'Checking latest market prices (ESI)...'}
-                      </span>
+                      <span>Checking latest market prices (ESI)...</span>
                     </div>
                   </div>
                 )}
@@ -1537,7 +1547,26 @@ export function MyPlansModal({
                       </div>
                     )}
 
-                    {activePlan.approach && (() => {
+                    {fillingApproach && (
+                      <div className="pt-2 border-t border-slate-800/80 space-y-2 animate-pulse">
+                        <div className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 text-[11px] font-semibold text-cyan-200">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400 shrink-0" />
+                            <span>Scanning en-route corridor (≤ 8j detour) & live ESI books...</span>
+                          </div>
+                          <span className="text-[10px] text-cyan-400/80 font-mono">LOADING</span>
+                        </div>
+                        <div className="rounded bg-slate-800/60 border border-slate-700/50 h-7 w-full" />
+                        <div className="rounded-lg bg-slate-900/60 border border-slate-800/80 p-2.5 space-y-2">
+                          <div className="rounded bg-emerald-500/10 border border-emerald-500/20 h-7 w-full" />
+                          <div className="h-3.5 bg-slate-800/70 rounded w-3/4" />
+                          <div className="h-3.5 bg-slate-800/60 rounded w-2/3" />
+                        </div>
+                        <div className="rounded bg-rose-500/10 border border-rose-500/20 h-7 w-full" />
+                      </div>
+                    )}
+
+                    {!fillingApproach && activePlan.approach && (() => {
                       const app = activePlan.approach;
                       const isOriginToAll = !activePlan.finalDestName;
                       const oriStop = activePlan.stops[0];
@@ -1578,50 +1607,120 @@ export function MyPlansModal({
                             </div>
                           )}
 
-                          <div className="rounded bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                              <span
-                                title="Jumps to pickup"
-                                className="text-[10px] font-medium text-emerald-200 bg-emerald-500/15 border border-emerald-500/35 px-1.5 py-0.5 rounded-full shrink-0 tabular-nums"
-                              >
-                                +{app.jumpsCurToBuy}j
-                              </span>
-                              {renderSecBadge(app.buySecurity)}
-                              <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/15 text-emerald-300 shrink-0">
-                                BUY
-                              </span>
-                              <span className="font-medium text-emerald-100 truncate">{app.buyStationName}</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleCopyStation(app.buyStationName, `app-buy:${app.buyStationId}`)
-                                }
-                                title="Copy station name"
-                                className="p-0.5 rounded text-slate-500 hover:text-white cursor-pointer shrink-0"
-                              >
-                                {copiedKey === `app-buy:${app.buyStationId}` ? (
-                                  <Check className="w-3 h-3 text-emerald-400" />
-                                ) : (
-                                  <Copy className="w-3 h-3" />
+                          {app.buyStops && app.buyStops.length > 1 ? (
+                            <>
+                              {renderStopMetricsBar(
+                                app.iskPerJump,
+                                app.totalCost,
+                                app.totalVolume,
+                                maxBudget,
+                                maxCargo
+                              )}
+                              <div className="space-y-2">
+                                {app.buyStops.map((bs, idx) => (
+                                  <div
+                                    key={bs.stationId}
+                                    className="rounded-lg bg-slate-900/50 border border-slate-800/80 p-2 space-y-1.5"
+                                  >
+                                    <div className="rounded bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                                      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                                        <span
+                                          title="Jumps from previous point"
+                                          className="text-[10px] font-medium text-emerald-200 bg-emerald-500/15 border border-emerald-500/35 px-1.5 py-0.5 rounded-full shrink-0 tabular-nums"
+                                        >
+                                          +{bs.jumpsFromPrev}j
+                                        </span>
+                                        {renderSecBadge(bs.security)}
+                                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/15 text-emerald-300 shrink-0">
+                                          BUY {idx + 1}
+                                        </span>
+                                        <span className="font-medium text-emerald-100 truncate">
+                                          {bs.stationName}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleCopyStation(
+                                              bs.stationName,
+                                              `app-buy:${bs.stationId}`
+                                            )
+                                          }
+                                          title="Copy station name"
+                                          className="p-0.5 rounded text-slate-500 hover:text-white cursor-pointer shrink-0"
+                                        >
+                                          {copiedKey === `app-buy:${bs.stationId}` ? (
+                                            <Check className="w-3 h-3 text-emerald-400" />
+                                          ) : (
+                                            <Copy className="w-3 h-3" />
+                                          )}
+                                        </button>
+                                        {renderStationListCopyButton(
+                                          bs.items,
+                                          `mb-app:${bs.stationId}`,
+                                          'buy'
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="divide-y divide-slate-800/60">
+                                      {bs.items.map((it) =>
+                                        renderPlanItemRow(
+                                          it,
+                                          `${activePlan.uid}:app:${it.typeId}`
+                                        )
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="rounded bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                                  <span
+                                    title="Jumps to pickup"
+                                    className="text-[10px] font-medium text-emerald-200 bg-emerald-500/15 border border-emerald-500/35 px-1.5 py-0.5 rounded-full shrink-0 tabular-nums"
+                                  >
+                                    +{app.jumpsCurToBuy}j
+                                  </span>
+                                  {renderSecBadge(app.buySecurity)}
+                                  <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/15 text-emerald-300 shrink-0">
+                                    BUY
+                                  </span>
+                                  <span className="font-medium text-emerald-100 truncate">{app.buyStationName}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleCopyStation(app.buyStationName, `app-buy:${app.buyStationId}`)
+                                    }
+                                    title="Copy station name"
+                                    className="p-0.5 rounded text-slate-500 hover:text-white cursor-pointer shrink-0"
+                                  >
+                                    {copiedKey === `app-buy:${app.buyStationId}` ? (
+                                      <Check className="w-3 h-3 text-emerald-400" />
+                                    ) : (
+                                      <Copy className="w-3 h-3" />
+                                    )}
+                                  </button>
+                                  {renderStationListCopyButton(app.items, `mb-app:${app.buyStationId}`, 'buy')}
+                                </div>
+                              </div>
+
+                              {renderStopMetricsBar(
+                                app.iskPerJump,
+                                app.totalCost,
+                                app.totalVolume,
+                                maxBudget,
+                                maxCargo
+                              )}
+
+                              <div className="divide-y divide-slate-800/60">
+                                {app.items.map((it) =>
+                                  renderPlanItemRow(it, `${activePlan.uid}:app:${it.typeId}`)
                                 )}
-                              </button>
-                              {renderStationListCopyButton(app.items, `mb-app:${app.buyStationId}`, 'buy')}
-                            </div>
-                          </div>
-
-                          {renderStopMetricsBar(
-                            app.iskPerJump,
-                            app.totalCost,
-                            app.totalVolume,
-                            maxBudget,
-                            maxCargo
+                              </div>
+                            </>
                           )}
-
-                          <div className="divide-y divide-slate-800/60">
-                            {app.items.map((it) =>
-                              renderPlanItemRow(it, `${activePlan.uid}:app:${it.typeId}`)
-                            )}
-                          </div>
 
                           <div className="rounded bg-rose-500/10 border border-rose-500/25 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                             <div className="flex items-center gap-1.5 min-w-0">

@@ -181,20 +181,24 @@ export function TripPlansPanel({
                   })()}
 
                   {/* Stops & Items */}
+                  {(() => {
+                    const planIsOriginToAll = plan.mode ? plan.mode === 'originToAll' : isDestAll;
+                    const planOriginName = plan.originStationName ?? (isDestAll ? originStationName : null);
+                    return (
                   <div className="space-y-2.5 text-xs flex-1">
-                    {isDestAll && originStationName && (
+                    {planIsOriginToAll && planOriginName && (
                       <div className="rounded px-2 py-1.5 border bg-emerald-500/10 border-emerald-500/25 flex items-center justify-between gap-1.5">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="text-[10px] font-medium text-emerald-200 bg-emerald-500/15 border border-emerald-500/35 px-1.5 py-0.5 rounded-full shrink-0 tabular-nums">
                             0j
                           </span>
-                          <span title={originStationName} className="font-medium text-emerald-100 truncate">
-                            {originStationName}
+                          <span title={planOriginName} className="font-medium text-emerald-100 truncate">
+                            {planOriginName}
                           </span>
                           <button
                             type="button"
                             onClick={(e) =>
-                              onCopyStation(e, `plan:${plan.id}:orig`, originStationName)
+                              onCopyStation(e, `plan:${plan.id}:orig`, planOriginName)
                             }
                             title="Copy station name"
                             className="p-0.5 text-slate-400 hover:text-white cursor-pointer shrink-0"
@@ -215,7 +219,7 @@ export function TripPlansPanel({
                       >
                         <div
                           className={`rounded px-2 py-1.5 border flex items-center justify-between gap-1.5 ${
-                            isDestAll
+                            planIsOriginToAll
                               ? 'bg-rose-500/10 border-rose-500/25'
                               : 'bg-emerald-500/10 border-emerald-500/25'
                           }`}
@@ -308,6 +312,8 @@ export function TripPlansPanel({
                       </div>
                     ))}
                   </div>
+                    );
+                  })()}
 
                   {plan.finalDestName && (
                     <div className="mt-auto flex items-center justify-between gap-1.5 text-[11px] px-2.5 py-1.5 rounded bg-rose-500/10 border border-rose-500/25 text-rose-200">

@@ -40,6 +40,18 @@ export interface SavedPlanStop {
   items: SavedPlanItem[];
 }
 
+export interface SavedApproachBuyStop {
+  stationId: number;
+  stationName: string;
+  systemId: number;
+  security: number | null;
+  jumpsFromPrev: number;
+  totalCost: number;
+  totalProfit: number;
+  totalVolume: number;
+  items: SavedPlanItem[];
+}
+
 export interface SavedApproachLeg {
   currentStationId: number;
   currentStationName: string;
@@ -64,6 +76,7 @@ export interface SavedApproachLeg {
   totalVolume: number;
   iskPerJump: number;
   items: SavedPlanItem[];
+  buyStops?: SavedApproachBuyStop[];
 }
 
 export interface SavedTripPlan {
@@ -528,7 +541,7 @@ export function buildEnRouteApproachLeg(
 
   const curJumpMap = getSystemJumpMap(currentStation.systemId, universe, routePref);
   const marketNodes = collectMarketStationNodes(dataset, empireData, liveBooks);
-  const MAX_DETOUR = 3;
+  const MAX_DETOUR = 8;
 
   // Score and select corridor market stations near Current -> Ori
   const corridor: { node: MarketStationNode; jCur: number; jOri: number; detour: number }[] = [];
@@ -576,7 +589,7 @@ export function buildEnRouteApproachLeg(
         c.node.stationId !== oriStop.stationId &&
         !c.node.isTopHub
     ),
-  ].slice(0, 20);
+  ].slice(0, 28);
   if (topCorridor.length < 2) {
     return {
       approach: null,
@@ -589,6 +602,13 @@ export function buildEnRouteApproachLeg(
 
   let bestApproach: SavedApproachLeg | null = null;
   let bestScore = -1;
+
+  interface BuyCandidateForSell {
+    buyCand: (typeof topCorridor)[number];
+    opps: ArbitrageOpportunity[];
+    singleProfit: number;
+  }
+  const buysBySell = new Map<number, { sellCand: (typeof topCorridor)[number]; buys: BuyCandidateForSell[] }>();
 
   for (const buyCand of topCorridor) {
     const buyMap = getSystemJumpMap(buyCand.node.systemId, universe, routePref);
@@ -639,10 +659,24 @@ export function buildEnRouteApproachLeg(
       );
       if (packed.items.length === 0 || packed.totalProfit <= 0) continue;
 
+      let sellBucket = buysBySell.get(sellCand.node.stationId);
+      if (!sellBucket) {
+        sellBucket = { sellCand, buys: [] };
+        buysBySell.set(sellCand.node.stationId, sellBucket);
+      }
+      sellBucket.buys.push({ buyCand, opps, singleProfit: packed.totalProfit });
+
+      if (buyCand.node.systemId === sellCand.node.systemId && packed.totalProfit < 1_000_000) {
+        continue;
+      }
+
       const iskPerJump = packed.totalProfit / Math.max(1, totalJumps);
-      // Slight preference for ending directly at Ori and lower detour
+      const minIskPerJump = detourJumps <= 4 ? 10_000 : 100_000;
+      if (iskPerJump < minIskPerJump) continue;
+      // Slight preference for ending directly at Ori; penalize same-system trades so en-route hauls win
       const oriBonus = sellCand.node.stationId === oriStop.stationId ? 1.05 : 1.0;
-      const score = iskPerJump * oriBonus;
+      const sameSystemPenalty = buyCand.node.systemId === sellCand.node.systemId ? 0.5 : 1.0;
+      const score = iskPerJump * oriBonus * sameSystemPenalty;
 
       if (score > bestScore) {
         bestScore = score;
@@ -675,10 +709,151 @@ export function buildEnRouteApproachLeg(
     }
   }
 
+  // Multi-stop Approach: combine up to 3 buy stations along Current -> Sell within MAX_DETOUR
+  for (const { sellCand, buys } of buysBySell.values()) {
+    if (buys.length < 2) continue;
+    // Prefer cross-system buys with highest profit first, then chain up to 3 stops ordered by jCur
+    const rankedBuys = [...buys].sort((a, b) => b.singleProfit - a.singleProfit);
+    const chosen: BuyCandidateForSell[] = [];
+
+    const computeChainJumps = (list: BuyCandidateForSell[]): number | null => {
+      const ordered = [...list].sort((a, b) => a.buyCand.jCur - b.buyCand.jCur);
+      let prevSys = currentStation.systemId;
+      let sum = 0;
+      for (const entry of ordered) {
+        const curSys = entry.buyCand.node.systemId;
+        const j =
+          prevSys === curSys
+            ? 0
+            : getSystemJumpMap(prevSys, universe, routePref)?.get(curSys);
+        if (j === undefined) return null;
+        sum += j;
+        prevSys = curSys;
+      }
+      const jLastToSell =
+        prevSys === sellCand.node.systemId
+          ? 0
+          : getSystemJumpMap(prevSys, universe, routePref)?.get(sellCand.node.systemId);
+      if (jLastToSell === undefined) return null;
+      return sum + jLastToSell + sellCand.jOri;
+    };
+
+    for (const cand of rankedBuys) {
+      if (chosen.length >= 3) break;
+      const trial = [...chosen, cand];
+      const chainJumps = computeChainJumps(trial);
+      if (chainJumps === null) continue;
+      if (chainJumps - directJumps > MAX_DETOUR) continue;
+      chosen.push(cand);
+    }
+
+    if (chosen.length < 2) continue;
+    chosen.sort((a, b) => a.buyCand.jCur - b.buyCand.jCur);
+
+    let remBudget = maxBudget > 0 ? maxBudget : Infinity;
+    let remCargo = maxCargo > 0 ? maxCargo : Infinity;
+    const buyStops: SavedApproachBuyStop[] = [];
+    const combinedItems: SavedPlanItem[] = [];
+    let totalCost = 0;
+    let totalProfit = 0;
+    let totalVolume = 0;
+    let prevSys = currentStation.systemId;
+    let sumBuyLegs = 0;
+
+    for (const entry of chosen) {
+      const packed = packApproachItems(
+        entry.opps,
+        entry.buyCand.node,
+        sellCand.node,
+        Number.isFinite(remBudget) ? remBudget : 0,
+        Number.isFinite(remCargo) ? remCargo : 0
+      );
+      if (packed.items.length === 0 || packed.totalProfit <= 0) continue;
+
+      const curSys = entry.buyCand.node.systemId;
+      const legJumps =
+        prevSys === curSys
+          ? 0
+          : getSystemJumpMap(prevSys, universe, routePref)?.get(curSys) ?? 0;
+      sumBuyLegs += legJumps;
+      prevSys = curSys;
+
+      if (Number.isFinite(remBudget)) remBudget = Math.max(0, remBudget - packed.totalCost);
+      if (Number.isFinite(remCargo)) remCargo = Math.max(0, remCargo - packed.totalVolume);
+      totalCost += packed.totalCost;
+      totalProfit += packed.totalProfit;
+      totalVolume += packed.totalVolume;
+      combinedItems.push(...packed.items);
+      buyStops.push({
+        stationId: entry.buyCand.node.stationId,
+        stationName: entry.buyCand.node.stationName,
+        systemId: entry.buyCand.node.systemId,
+        security: entry.buyCand.node.security,
+        jumpsFromPrev: legJumps,
+        totalCost: packed.totalCost,
+        totalProfit: packed.totalProfit,
+        totalVolume: packed.totalVolume,
+        items: packed.items,
+      });
+    }
+
+    if (buyStops.length < 2) continue;
+    const jLastToSell =
+      prevSys === sellCand.node.systemId
+        ? 0
+        : getSystemJumpMap(prevSys, universe, routePref)?.get(sellCand.node.systemId);
+    if (jLastToSell === undefined) continue;
+
+    const totalJumps = sumBuyLegs + jLastToSell + sellCand.jOri;
+    const detourJumps = totalJumps - directJumps;
+    if (detourJumps > MAX_DETOUR) continue;
+
+    const allSameSystem = buyStops.every((b) => b.systemId === sellCand.node.systemId);
+    if (allSameSystem && totalProfit < 1_000_000) continue;
+
+    const iskPerJump = totalProfit / Math.max(1, totalJumps);
+    const minIskPerJump = detourJumps <= 4 ? 10_000 : 100_000;
+    if (iskPerJump < minIskPerJump) continue;
+    const oriBonus = sellCand.node.stationId === oriStop.stationId ? 1.05 : 1.0;
+    const sameSystemPenalty = allSameSystem ? 0.5 : 1.0;
+    const score = iskPerJump * oriBonus * sameSystemPenalty;
+
+    if (score > bestScore) {
+      bestScore = score;
+      const firstStop = buyStops[0];
+      bestApproach = {
+        currentStationId: currentStation.stationId,
+        currentStationName: currentStation.stationName,
+        currentSystemId: currentStation.systemId,
+        currentSecurity: currentStation.security,
+        buyStationId: firstStop.stationId,
+        buyStationName: firstStop.stationName,
+        buySystemId: firstStop.systemId,
+        buySecurity: firstStop.security,
+        sellStationId: sellCand.node.stationId,
+        sellStationName: sellCand.node.stationName,
+        sellSystemId: sellCand.node.systemId,
+        sellSecurity: sellCand.node.security,
+        jumpsCurToBuy: firstStop.jumpsFromPrev,
+        jumpsBuyToSell: jLastToSell,
+        jumpsSellToOri: sellCand.jOri,
+        directJumpsCurToOri: directJumps,
+        detourJumps,
+        totalJumps,
+        totalCost,
+        totalProfit,
+        totalVolume,
+        iskPerJump,
+        items: combinedItems,
+        buyStops,
+      };
+    }
+  }
+
   if (!bestApproach) {
     return {
       approach: null,
-      reason: 'No profitable en-route instant trades found within 3 jumps detour.',
+      reason: 'No profitable en-route trades found (≥ 10k/j for ≤ 4j detour, or ≥ 100k/j for > 4j detour).',
     };
   }
 

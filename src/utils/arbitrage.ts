@@ -595,6 +595,51 @@ export function calculateArbitrage(
       }
     }
 
+    // 1d Avg Price Match: verify real trades happen near Sell Orders (patient) and Buy Orders (order)
+    if (tradeMode === 'patient' && effectiveDestRegionId !== undefined && destBook.s.length > 0) {
+      const destAvg1d = dataset.historyAvg1d?.[String(effectiveDestRegionId)]?.[typeIdStr];
+      if (destAvg1d && destAvg1d > 0) {
+        const top5Dest = destBook.s.slice(0, 5);
+        const top5DestAvg = top5Dest.reduce((s, [p]) => s + p, 0) / top5Dest.length;
+        const sellRatio = top5DestAvg > 0 ? destAvg1d / top5DestAvg : null;
+        if (sellRatio !== null) {
+          if (sellRatio < 0.45) {
+            rawScore = Math.min(Math.round(rawScore * 0.65), 20);
+            notes.push(`weak sell match (${sellRatio.toFixed(2)}x, cap 20)`);
+          } else if (sellRatio < 0.7) {
+            rawScore = Math.round(rawScore * 0.85);
+            notes.push(`soft sell match (${sellRatio.toFixed(2)}x)`);
+          } else if (sellRatio >= 0.8 && sellRatio <= 1.25) {
+            rawScore = Math.min(100, rawScore + 5);
+            notes.push(`strong sell match (${sellRatio.toFixed(2)}x, +5)`);
+          }
+        }
+      }
+    }
+
+    if (buyMethod === 'order' && originBuys.length > 0) {
+      const effOrigRegId = originMeta?.regionId ?? originRegionId;
+      const origAvg1d =
+        effOrigRegId !== undefined ? dataset.historyAvg1d?.[String(effOrigRegId)]?.[typeIdStr] : undefined;
+      if (origAvg1d && origAvg1d > 0) {
+        const top5Orig = originBuys.slice(0, 5);
+        const top5OrigAvg = top5Orig.reduce((s, [p]) => s + p, 0) / top5Orig.length;
+        const buyRatio = top5OrigAvg > 0 ? origAvg1d / top5OrigAvg : null;
+        if (buyRatio !== null) {
+          if (buyRatio > 2.2) {
+            rawScore = Math.min(Math.round(rawScore * 0.65), 20);
+            notes.push(`slow buy fill (${buyRatio.toFixed(2)}x, cap 20)`);
+          } else if (buyRatio > 1.5) {
+            rawScore = Math.round(rawScore * 0.85);
+            notes.push(`moderate buy fill (${buyRatio.toFixed(2)}x)`);
+          } else if (buyRatio >= 0.8 && buyRatio <= 1.25) {
+            rawScore = Math.min(100, rawScore + 5);
+            notes.push(`fast buy fill (${buyRatio.toFixed(2)}x, +5)`);
+          }
+        }
+      }
+    }
+
     const tradeScore = Math.max(0, Math.min(100, rawScore));
     const scoreBreakdown = {
       liq: Math.round(liqTotalPts),
@@ -1243,14 +1288,14 @@ export async function calculateAllToAllArbitrageProgressive(
 
   const priorityDestIds = new Set<number>([
     ...dataset.hubs.map((h) => h.stationId),
-    ...dataset.topStations.slice(0, 10).map((s) => s.stationId),
-    ...(dataset.fwStations ?? []).slice(0, 10).map((s) => s.stationId),
+    ...dataset.topStations.slice(0, 25).map((s) => s.stationId),
+    ...(dataset.fwStations ?? []).slice(0, 25).map((s) => s.stationId),
   ]);
   const results: ArbitrageOpportunity[] = [];
   const total = candidateList.length;
   let sliceStart = performance.now();
   let lastEmit = sliceStart;
-  const MAX_ROUTES_PER_ITEM = 12;
+  const MAX_ROUTES_PER_ITEM = 18;
 
   const maybeEmitProgress = (done: number) => {
     const now = performance.now();
@@ -1337,7 +1382,7 @@ export async function calculateAllToAllArbitrageProgressive(
           results.push(list[0]);
           itemMatchCount++;
           destOrigMatches++;
-          if (destOrigMatches >= 2) break;
+          if (destOrigMatches >= (isPriorityDest ? 25 : 3)) break;
         }
 
         if (performance.now() - sliceStart > 16) {
