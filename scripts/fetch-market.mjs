@@ -609,6 +609,8 @@ async function fetchMarketHistory(targetRegionIds, sde) {
       if (!res.ok) return null;
       const buf = new Uint8Array(await res.arrayBuffer());
       const csv = Buffer.from(seekBzip.decode(buf)).toString('utf8');
+      // Skip partial/placeholder EVE Ref files (a full day has ~100k+ rows, >100 KB)
+      if (csv.length < 50_000) return null;
       return { dateStr, csv };
     } catch {
       return null;
@@ -676,7 +678,7 @@ async function fetchMarketHistory(targetRegionIds, sde) {
 
       rec.sum30 += vol;
       rec.sellHighWeighted30 += high * vol;
-      if (dayIdx === 0 && avgPrice > 0) {
+      if (rec.vol1d === 0 && dayIdx <= 2 && avgPrice > 0) {
         rec.avg1d = avgPrice;
         rec.low1d = low;
         rec.high1d = high;

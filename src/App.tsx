@@ -1079,7 +1079,7 @@ export function App() {
     let cancelled = false;
     setTrendingLoading(true);
     setTrendingError(null);
-    fetch('./data/market-trending.json')
+    fetch(`./data/market-trending.json?t=${Date.now()}`, { cache: 'no-store' })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json() as Promise<TrendingDataset>;
